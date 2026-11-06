@@ -17,7 +17,7 @@ export const mockValidDriveFile = {
   parents: ['root_folder_id_xyz'],
   createdTime: '2026-10-15T14:32:00.000Z',
   modifiedTime: '2026-11-01T18:20:00.000Z',
-  size: 2048576,
+  size: '2048576',
   webViewLink:
     'https://drive.google.com/file/d/1a2b3c4d5e6f7g8h9i0j_valid_file_id/view',
   webContentLink:

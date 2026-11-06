@@ -6,6 +6,7 @@ import {
   isDriveFolder,
   isDriveShortcut,
   resolveItemKind,
+  DriveSizeSchema,
 } from '@/utils/validators';
 import {
   mockValidDriveFile,
@@ -120,5 +121,57 @@ describe('Camada de Validação — Contratos Google Drive API v3 (PR03)', () =>
     expect(
       resolveItemKind('application/octet-stream', 'desconhecido.bin')
     ).toBe('file');
+  });
+
+  describe('Validação Estrita de Tamanho (size) — Compatibilidade Google Drive API v3 (PR05)', () => {
+    it('aceita e preserva strings numéricas int64 legítimas', () => {
+      const parsed = DriveSizeSchema.safeParse('1048576');
+      expect(parsed.success).toBe(true);
+      if (parsed.success) {
+        expect(parsed.data).toBe('1048576');
+      }
+    });
+
+    it('preserva valores inteiros de 64 bits gigantes sem perda silenciosa de precisão', () => {
+      // Exemplo de tamanho acima de Number.MAX_SAFE_INTEGER (9007199254740991)
+      const bigIntStr = '9007199254740992999';
+      const parsed = DriveSizeSchema.safeParse(bigIntStr);
+      expect(parsed.success).toBe(true);
+      if (parsed.success) {
+        expect(parsed.data).toBe(bigIntStr);
+      }
+    });
+
+    it('converte números inteiros não-negativos para string fielmente', () => {
+      const parsed = DriveSizeSchema.safeParse(4096);
+      expect(parsed.success).toBe(true);
+      if (parsed.success) {
+        expect(parsed.data).toBe('4096');
+      }
+    });
+
+    it('aceita valor zero para arquivos vazios', () => {
+      expect(DriveSizeSchema.parse('0')).toBe('0');
+      expect(DriveSizeSchema.parse(0)).toBe('0');
+    });
+
+    it('rejeita valores negativos em números e strings', () => {
+      expect(DriveSizeSchema.safeParse(-1).success).toBe(false);
+      expect(DriveSizeSchema.safeParse('-1024').success).toBe(false);
+    });
+
+    it('rejeita strings com caracteres não-numéricos ou decimais', () => {
+      expect(DriveSizeSchema.safeParse('abc').success).toBe(false);
+      expect(DriveSizeSchema.safeParse('12.34').success).toBe(false);
+      expect(DriveSizeSchema.safeParse('').success).toBe(false);
+    });
+
+    it('permite tamanho omitido (undefined) para pastas e documentos Google Workspace', () => {
+      const parsed = DriveSizeSchema.safeParse(undefined);
+      expect(parsed.success).toBe(true);
+      if (parsed.success) {
+        expect(parsed.data).toBeUndefined();
+      }
+    });
   });
 });

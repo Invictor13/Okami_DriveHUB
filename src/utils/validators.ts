@@ -32,6 +32,28 @@ export const DriveShortcutDetailsSchema = z.object({
 });
 
 /**
+ * Schema Zod para validação do tamanho do arquivo da Google Drive API.
+ * Conforme especificação oficial, o tamanho é retornado como string numérica de 64 bits (int64).
+ * Suporta também entrada numérica inteira não-negativa para flexibilidade, convertendo para string
+ * sem perda de precisão e rejeitando categoricamente valores negativos e caracteres não-numéricos.
+ */
+export const DriveSizeSchema = z
+  .union([
+    z
+      .string()
+      .regex(
+        /^\d+$/,
+        'O tamanho deve ser uma string de dígitos numéricos não-negativos'
+      ),
+    z
+      .number()
+      .int('O tamanho deve ser um número inteiro')
+      .nonnegative('O tamanho não pode ser negativo'),
+  ])
+  .transform((val) => String(val))
+  .optional();
+
+/**
  * Schema Zod estrito para metadados de arquivos e pastas reais do Google Drive API v3.
  *
  * REGRA INEGOCIÁVEL:
@@ -46,7 +68,7 @@ export const DriveItemSchema = z.object({
   parents: z.array(z.string().min(1)).optional(),
   createdTime: z.string().optional(),
   modifiedTime: z.string().optional(),
-  size: z.coerce.number().nonnegative().optional(),
+  size: DriveSizeSchema,
   webViewLink: z.string().url('webViewLink deve ser uma URL válida').optional(),
   webContentLink: z
     .string()

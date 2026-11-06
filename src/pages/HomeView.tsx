@@ -1,6 +1,7 @@
 import type { FC } from 'react';
 import { Badge } from '@/components/common/Badge';
 import { useAuth } from '@/services/auth';
+import { DriveExplorer } from '@/components/explorer/DriveExplorer';
 import {
   ShieldCheck,
   CloudOff,
@@ -21,8 +22,8 @@ export const HomeView: FC = () => {
       {/* Título Principal Institucional e Subtítulo */}
       <div className="max-w-3xl">
         <div className="mb-4 flex flex-wrap items-center justify-center gap-2">
-          <Badge variant="cyan">PR04 · Autenticação Segura</Badge>
-          <Badge variant="slate">Google Identity Services (GIS)</Badge>
+          <Badge variant="cyan">PR05 · Integração Drive API v3</Badge>
+          <Badge variant="slate">Leitura Real de Arquivos e Pastas</Badge>
         </div>
 
         <h1 className="text-3xl font-extrabold tracking-tight text-white sm:text-5xl">
@@ -73,7 +74,7 @@ export const HomeView: FC = () => {
                 metadados). Conforme a regra de{' '}
                 <strong className="text-white">integridade de dados</strong>, os
                 tokens permanecem exclusivamente em memória volátil e a
-                comunicação com a Google Drive API v3 será ativada na{' '}
+                comunicação com a Google Drive API v3 está ativa na{' '}
                 <strong className="text-nintendo-cyan">PR05</strong>.
               </p>
 
@@ -224,6 +225,9 @@ export const HomeView: FC = () => {
         </div>
       </section>
 
+      {/* Explorador de Arquivos e Pastas Reais (Ativo quando autenticado) */}
+      {session.status === 'connected' && <DriveExplorer />}
+
       {/* Roteiro Técnico Transparente */}
       <div className="mt-6 flex flex-wrap items-center justify-center gap-2 text-xs text-slate-400">
         <span className="font-mono text-[11px]">Roteiro:</span>
@@ -243,12 +247,16 @@ export const HomeView: FC = () => {
           PR03.1 Pages ✓
         </span>
         <span className="text-slate-600">→</span>
+        <span className="rounded-md bg-emerald-500/10 px-2 py-1 font-mono text-[10px] text-emerald-400">
+          PR04 Auth GIS ✓
+        </span>
+        <span className="text-slate-600">→</span>
         <span className="rounded-md border border-nintendo-cyan/40 bg-nintendo-cyan/20 px-2 py-1 font-mono text-[10px] font-bold text-nintendo-cyan">
-          PR04 Auth GIS 🐺
+          PR05 Drive API 🐺
         </span>
         <span className="text-slate-600">→</span>
         <span className="rounded-md bg-white/5 px-2 py-1 font-mono text-[10px] text-slate-400">
-          PR05 Drive API
+          PR06 Estado & Cache
         </span>
       </div>
     </main>

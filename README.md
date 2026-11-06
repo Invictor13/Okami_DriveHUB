@@ -9,7 +9,7 @@
 O **Okami DriveHUB** é um hub de arquivos e navegação pessoal moderno, responsivo e modular. Ele une fluidez visual, navegação otimizada por teclado e controles de console à organização de arquivos e pastas reais do usuário no Google Drive.
 
 > [!NOTE]
-> **Situação Atual da Integração (PR04):** A camada de autenticação oficial com **Google Identity Services (GIS)** foi concluída com sucesso utilizando o modelo oficial OAuth 2.0 Token Model. Os tokens são mantidos estritamente em memória volátil, sob o princípio do menor privilégio (`drive.metadata.readonly`). A comunicação HTTP com os endpoints reais da Google Drive API v3 será implementada na **PR05**. Nenhum dado simulado ou arquivo fictício é apresentado.
+> **Situação Atual da Integração (PR05):** A primeira integração funcional com a **Google Drive API v3** foi concluída com sucesso. A listagem de arquivos, pastas e atalhos reais em modo estrito de leitura (`drive.metadata.readonly`), navegação em profundidade com breadcrumbs e paginação contínua (`nextPageToken`) está plenamente operacional. Nenhum dado simulado ou arquivo fictício é apresentado.
 
 ---
 
@@ -141,6 +141,62 @@ VITE_GOOGLE_CLIENT_ID=seu_client_id_aqui.apps.googleusercontent.com
 - **Duração do Token:** Os tokens de acesso emitidos pelo fluxo implícito do Google Identity Services expiram em 1 hora.
 - **Ausência de Refresh Tokens em SPAs:** Por diretrizes de segurança da especificação OAuth 2.0 para clientes públicos (navegadores sem backend), refresh tokens de longa duração não são emitidos no frontend.
 - **Reautenticação:** Quando a sessão expira, a aplicação transita suavemente para o estado desconectado e o usuário pode reautenticar clicando no botão "Conectar Conta Google".
+
+---
+
+## 📁 Integração Real com Google Drive API v3 (PR05)
+
+O **Okami DriveHUB** consome diretamente a **Google Drive API v3** oficial em modo **estrito de leitura** (`drive.metadata.readonly`), permitindo a exploração de arquivos, pastas e atalhos reais da conta conectada.
+
+### 1. Endpoint e Parâmetros Utilizados
+
+A consulta de recursos é centralizada em [`src/services/drive/driveApiService.ts`](src/services/drive/driveApiService.ts):
+
+- **Endpoint Oficial:** `https://www.googleapis.com/drive/v3/files` (`files.list`)
+- **Cabeçalhos:**
+  - `Authorization: Bearer <access_token>` (injetado exclusivamente em tempo de execução via [`tokenStore`](src/services/auth/tokenStore.ts)).
+  - `Accept: application/json`.
+- **Filtro de Consulta (`q`):**
+  - Diretório Raiz: `'root' in parents and trashed = false`
+  - Subpastas: `'<FOLDER_ID>' in parents and trashed = false` (onde `<FOLDER_ID>` é o ID canônico opaco do Drive).
+- **Campos Solicitados (`fields`):**
+  `nextPageToken, incompleteSearch, files(id, name, mimeType, parents, createdTime, modifiedTime, size, webViewLink, webContentLink, iconLink, thumbnailLink, trashed, shared, driveId, version, capabilities, shortcutDetails)`
+- **Ordenação (`orderBy`):** `'folder, name'` (agrupa pastas no topo, seguidas por ordem alfabética).
+- **Shared Drives:** `supportsAllDrives=true` e `includeItemsFromAllDrives=true` para garantir compatibilidade com itens e diretórios compartilhados.
+
+### 2. Navegação em Profundidade e Suporte a Atalhos
+
+- **Navegação por Breadcrumbs:** A trilha de diretórios é mantida em memória (`folderStack`), permitindo avançar em pastas filhas e retornar a qualquer nível anterior com um clique.
+- **Identificação Canônica Opaca:** Os identificadores de pastas e arquivos são tratados estritamente como strings opacas originais do Google Drive. Jamais são inferidos ou gerados artificialmente.
+- **Atalhos do Google Drive (`application/vnd.google-apps.shortcut`):** Mapeados através do contrato `shortcutDetails`, preservando o `targetId` e o `targetMimeType` do item de destino sem confundir o ID do atalho com o ID do alvo.
+
+### 3. Paginação Real com `nextPageToken`
+
+- Quando uma pasta possui mais itens do que o limite da página (`pageSize: 50`), a API retorna um `nextPageToken`.
+- O hook [`useDriveFiles`](src/services/drive/useDriveFiles.ts) armazena o token e disponibiliza a ação `loadNextPage()`.
+- Os novos itens são anexados à lista existente com **deduplicação por ID canônico**, garantindo ausência de itens duplicados na interface.
+- Caso ocorra uma falha de rede durante o carregamento de uma página subsequente, os itens já visualizados são preservados.
+
+### 4. Tratamento de Erros e Resiliência da Sessão
+
+| Status HTTP / Erro             | Diagnóstico Técnico                                | Comportamento da Aplicação                                                                                                                        |
+| :----------------------------- | :------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **HTTP 401 Unauthorized**      | Token de acesso expirado ou revogado               | O token é imediatamente descartado de [`tokenStore`](src/services/auth/tokenStore.ts) e a sessão é deslogada com convite amigável para reconexão. |
+| **HTTP 403 Forbidden**         | Permissão insuficiente ou taxa de limite atingida  | Alerta visual de acesso negado sem expor mensagens confidenciais da API.                                                                          |
+| **HTTP 404 Not Found**         | Pasta ou arquivo não encontrado                    | Alerta informando que o diretório não existe mais no Drive.                                                                                       |
+| **HTTP 429 Too Many Requests** | Excesso temporário de requisições                  | Notificação amigável de limitação de taxa com opção de tentar novamente.                                                                          |
+| **HTTP 5xx Server Error**      | Indisponibilidade temporária dos servidores Google | Notificação de falha nos servidores da Google com botão de recarregar.                                                                            |
+| **Falha de Rede**              | Sem conexão à internet                             | Notificação de falha de conexão marcada como `retryable`.                                                                                         |
+| **Validação Zod**              | Resposta violando contratos de domínio             | Rejeição imediata antes de poluir o estado da aplicação.                                                                                          |
+
+### 5. Tratamento Fiel do Tamanho (`size`)
+
+A Google Drive API v3 representa o tamanho de arquivos como strings numéricas inteiras de 64 bits (`int64`), omitindo o campo para pastas e documentos nativos do Google Workspace. O contrato [`DriveFile`](src/types/drive.ts) e o validador [`DriveSizeSchema`](src/utils/validators.ts) tratam o campo com máxima precisão:
+
+- Aceita strings numéricas int64 e converte inteiros não-negativos em strings.
+- Rejeita categoricamente números negativos e strings não-numéricas.
+- Preserva valores maiores que `Number.MAX_SAFE_INTEGER` sem perda silenciosa de precisão.
+- [`formatBytes()`](src/utils/formatters.ts) converte valores de forma segura para apresentação humana legível (B, KB, MB, GB, TB, PB), exibindo `—` para pastas e arquivos nativos.
 
 ---
 
@@ -285,8 +341,9 @@ Okami_DriveHUB/
 │   ├── components/
 │   │   ├── common/           # Componentes atômicos reutilizáveis (Badge, ErrorBoundary)
 │   │   ├── layout/           # Componentes estruturais (SystemHeader, BottomDock)
+│   │   ├── explorer/         # [PR05] Navegador de arquivos e pastas reais do Drive
+│   │   │   └── DriveExplorer.tsx # Trilha de pastas, listagem real e paginação
 │   │   ├── carousel/         # [PR07] Carrossel estilo console e cards
-│   │   ├── explorer/         # [PR08] Navegador de arquivos e pré-visualização
 │   │   └── adm/              # [PR08] Métricas e dashboard administrativo
 │   ├── pages/
 │   │   └── HomeView.tsx      # Palco central institucional e de estado de conexão
@@ -296,7 +353,9 @@ Okami_DriveHUB/
 │   │   │   ├── gisLoader.ts      # Carregamento seguro da biblioteca oficial GIS
 │   │   │   ├── googleAuthService.ts # OAuth 2.0 Token Client e perfil
 │   │   │   └── tokenStore.ts     # Armazenamento de tokens em memória volátil (RAM)
-│   │   ├── drive/            # [PR05] Cliente da API v3 do Google Drive
+│   │   ├── drive/            # [PR05] Cliente HTTP oficial da Google Drive API v3
+│   │   │   ├── driveApiService.ts # Cliente de requisições autenticadas (files.list)
+│   │   │   └── useDriveFiles.ts   # Hook de paginação, navegação e sincronização
 │   │   ├── audio/            # [PR07] Sintetizador Web Audio API estilo console
 │   │   ├── canvas/           # [PR07] Partículas e ondas interativas a 60 FPS
 │   │   └── storage/          # [PR06] Adaptadores de armazenamento local e cache
@@ -312,20 +371,24 @@ Okami_DriveHUB/
 │   │   ├── sync.ts           # Estados e contratos de sincronização
 │   │   └── ui.ts             # Zonas de navegação e preferências do usuário
 │   └── utils/
-│       ├── formatters.ts     # Utilitários de formatação
+│       ├── formatters.ts     # Utilitários de formatação de bytes e dados
 │       ├── sanitizers.ts     # Funções puras de sanitização e proteção contra XSS
-│       └── validators.ts     # Schemas e validadores em tempo de execução com Zod
+│       └── validators.ts     # Schemas Zod de validação (DriveSizeSchema, etc.)
 └── tests/
     ├── App.test.tsx          # Testes de montagem e integridade da interface
+    ├── formatters.test.ts    # Testes de formatação e conversão segura de bytes
     ├── integrity.test.ts     # Testes de integridade de dados e separação de domínio
     ├── sanitizers.test.ts    # Testes de sanitização de URLs, nomes e strings HTML
     ├── setup.ts              # Configuração do ambiente com testing-library
     ├── validators.test.ts    # Testes dos validadores Zod da Google Drive API
     ├── components/
-    │   └── AuthIntegration.test.tsx # Testes de integração de interface e auth
+    │   ├── AuthIntegration.test.tsx # Testes de integração de interface e auth
+    │   └── DriveExplorer.test.tsx   # Testes da interface do explorador de arquivos
     ├── services/
+    │   ├── driveApiService.test.ts  # Testes do cliente HTTP da Drive API v3
     │   ├── googleAuthService.test.ts # Testes do serviço GIS e fluxos OAuth
-    │   └── tokenStore.test.ts        # Testes de segurança de tokens em memória RAM
+    │   ├── tokenStore.test.ts        # Testes de segurança de tokens em memória RAM
+    │   └── useDriveFiles.test.ts     # Testes do hook de navegação e sincronização
     └── mocks/
         └── driveMocks.ts     # Mocks isolados exclusivamente para testes automatizados
 ```
@@ -339,7 +402,7 @@ Okami_DriveHUB/
 - [x] **PR03 — Contratos TypeScript, Sanitização e Higienização de Dados**
 - [x] **PR03.1 — Preparação e Deploy no GitHub Pages**
 - [x] **PR04 — Camada de Autenticação Segura (Google Identity Services)**
-- [ ] **PR05 — Serviço de Integração Real com Google Drive API v3**
+- [x] **PR05 — Serviço de Integração Real com Google Drive API v3**
 - [ ] **PR06 — Gerenciamento de Estado Reativo e Cache Local**
 - [ ] **PR07 — Componentes Core e Experiência Horizon OS (Nintendo Switch UX)**
 - [ ] **PR08 — Módulos Secundários (Explorer, Atalhos Web, Dashboard ADM)**

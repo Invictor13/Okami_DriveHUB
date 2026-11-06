@@ -69,7 +69,11 @@ export interface DriveFile {
   parents?: string[];
   createdTime?: string;
   modifiedTime?: string;
-  size?: number;
+  /**
+   * Tamanho do arquivo em bytes, conforme especificação da Google Drive API v3 (int64 como string).
+   * Omitido para pastas e documentos do Google Workspace (Docs, Sheets, Slides, Forms).
+   */
+  size?: string;
   webViewLink?: string;
   webContentLink?: string;
   iconLink?: string;
