@@ -1,18 +1,15 @@
 /**
- * Status legítimos de sincronização e conexão com o Google Drive
+ * Ponto de exportação central de Contratos e Tipos — Okami DriveHUB
  */
-export type ConnectionStatus =
-  'disconnected' | 'connecting' | 'connected' | 'error';
 
-/**
- * Zonas ativas de navegação na interface inspirada no Horizon OS
- */
-export type NavigationZone =
-  'header' | 'carousel' | 'dock' | 'explorer' | 'shortcuts' | 'adm';
+export * from './drive';
+export * from './auth';
+export * from './sync';
+export * from './ui';
+export * from './bookmarks';
 
-/**
- * Contrato inicial para itens do Google Drive (será expandido na PR03)
- */
+// Compatibilidade transitória com componentes da PR02
+export type ConnectionStatus = import('./auth').AuthStatus;
 export interface DriveItemReference {
   id: string;
   name: string;

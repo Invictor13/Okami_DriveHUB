@@ -1,15 +1,7 @@
 /**
- * Utilitários de Domínio e Formatação — Okami DriveHUB
+ * Utilitários de Domínio, Sanitização e Validação — Okami DriveHUB
  */
 
-/**
- * Converte bytes em representação humana legível (KB, MB, GB).
- */
-export function formatBytes(bytes: number, decimals = 1): string {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const dm = decimals < 0 ? 0 : decimals;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
-}
+export * from './validators';
+export * from './sanitizers';
+export * from './formatters';
