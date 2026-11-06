@@ -134,9 +134,11 @@ describe('useDriveFiles — Hook de Gerenciamento e Navegação do Drive (PR05 /
     expect(result.current.currentFolder.id).toBe('subfolder_id_456');
     expect(result.current.currentFolder.name).toBe('Projetos 2026');
 
-    expect(fetchSpy).toHaveBeenLastCalledWith({
-      parentId: 'subfolder_id_456',
-    });
+    expect(fetchSpy).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        parentId: 'subfolder_id_456',
+      })
+    );
 
     // Retorna para cima (navigateUp)
     await act(async () => {

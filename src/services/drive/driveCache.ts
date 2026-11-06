@@ -91,4 +91,3 @@ export class DriveMemoryCache {
 
 // Instância singleton do cache em memória volátil
 export const driveCache = new DriveMemoryCache();
-

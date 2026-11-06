@@ -80,6 +80,10 @@ export interface FetchDriveFilesOptions {
    * Consulta personalizada legada mantida para compatibilidade em testes existentes.
    */
   customQuery?: string;
+  /**
+   * AbortSignal opcional para cancelamento ativo da requisição HTTP em voo
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -232,8 +236,15 @@ export async function fetchDriveFiles(
         Authorization: `Bearer ${token}`,
         Accept: 'application/json',
       },
+      signal: options.signal,
     });
   } catch (err) {
+    if (
+      (err instanceof DOMException && err.name === 'AbortError') ||
+      (err instanceof Error && err.name === 'AbortError')
+    ) {
+      throw err;
+    }
     throw createDriveError(
       'network_error',
       'Falha de comunicação de rede ao contatar a Google Drive API.',
