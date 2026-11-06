@@ -1,0 +1,40 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --accent-color: #00d2ff;
+  --accent-glow: rgba(0, 210, 255, 0.45);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background-color: #0b0e14;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Horizon OS Glass Pill effect */
+.glass-pill {
+  background: rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.glass-pill-active {
+  background: rgba(0, 210, 255, 0.16);
+  border-color: rgba(0, 210, 255, 0.45);
+  color: #00d2ff;
+  box-shadow: 0 8px 24px -6px rgba(0, 210, 255, 0.45);
+}
