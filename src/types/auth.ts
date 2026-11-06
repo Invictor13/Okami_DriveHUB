@@ -44,3 +44,28 @@ export interface AuthError {
   message: string;
   details?: unknown;
 }
+
+/**
+ * Perfil oficial do usuário retornado pelo endpoint userinfo do Google
+ */
+export interface GoogleUserProfile {
+  sub: string;
+  name: string;
+  given_name?: string;
+  family_name?: string;
+  picture?: string;
+  email: string;
+  email_verified?: boolean;
+}
+
+/**
+ * Interface do contexto React de autenticação
+ */
+export interface AuthContextValue {
+  session: AuthSession;
+  error: AuthError | null;
+  isConfigured: boolean;
+  login: () => Promise<void>;
+  logout: () => Promise<void>;
+  clearError: () => void;
+}

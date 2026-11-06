@@ -1,9 +1,7 @@
 /**
- * Módulo de Autenticação — Okami DriveHUB
+ * Camada de Autenticação — Okami DriveHUB
  *
- * Implementação planejada para PR04:
- * - Google Identity Services (GIS) oficial.
- * - Ciclo de vida de tokens (expiração, aviso de renovação, desconexão limpa).
- * - Sem segredos ou client secrets no frontend.
+ * Re-exportação padronizada do serviço de autenticação Google Identity Services (GIS).
  */
-export {};
+
+export * from '@/services/auth';

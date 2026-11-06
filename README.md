@@ -9,7 +9,7 @@
 O **Okami DriveHUB** é um hub de arquivos e navegação pessoal moderno, responsivo e modular. Ele une fluidez visual, navegação otimizada por teclado e controles de console à organização de arquivos e pastas reais do usuário no Google Drive.
 
 > [!NOTE]
-> **Situação Atual da Integração (PR03):** A camada de contratos de domínio estritos, validação em tempo de execução com Zod e sanitização de segurança foi concluída. A autenticação oficial (Google Identity Services) e a comunicação HTTP com os endpoints reais da Google Drive API v3 serão implementadas nas **PRs 04 e 05**. Nenhum dado simulado ou arquivo fictício é apresentado.
+> **Situação Atual da Integração (PR04):** A camada de autenticação oficial com **Google Identity Services (GIS)** foi concluída com sucesso utilizando o modelo oficial OAuth 2.0 Token Model. Os tokens são mantidos estritamente em memória volátil, sob o princípio do menor privilégio (`drive.metadata.readonly`). A comunicação HTTP com os endpoints reais da Google Drive API v3 será implementada na **PR05**. Nenhum dado simulado ou arquivo fictício é apresentado.
 
 ---
 
@@ -58,6 +58,89 @@ Modelagem dos metadados oficiais retornados pela API v3 do Google Drive:
 
 - **`BookmarkItem`**: Atalhos web do usuário (Speed Dial local), claramente diferenciados de arquivos do Drive.
 - **`UserPreferences`**: Tema (dark/light), áudio ativado e layout preferido do Explorer.
+
+---
+
+## 🔐 Autenticação Segura com Google Identity Services (PR04)
+
+O **Okami DriveHUB** adota a biblioteca oficial **Google Identity Services (GIS)** utilizando o **OAuth 2.0 Token Model** para Single Page Applications (SPAs).
+
+### 1. Princípio do Menor Privilégio e Escopos Solicitados
+
+A autorização solicita exclusivamente os escopos essenciais para identificação do usuário e visualização de metadados:
+
+| Escopo                                                    | Finalidade Técnica                                | Permissões Concedidas                                                                                                            |
+| :-------------------------------------------------------- | :------------------------------------------------ | :------------------------------------------------------------------------------------------------------------------------------- |
+| `openid`                                                  | Identificação segura da conta                     | ID de autenticação do Google                                                                                                     |
+| `email`                                                   | Identificação cadastral do usuário                | Endereço de e-mail verificado                                                                                                    |
+| `profile`                                                 | Apresentação personalizada                        | Nome e foto do perfil                                                                                                            |
+| `https://www.googleapis.com/auth/drive.metadata.readonly` | Leitura estrita de metadados de arquivos e pastas | Apenas nomes, tipos MIME, tamanhos e IDs. **Sem acesso ao conteúdo binário e sem permissão de gravação, exclusão ou alteração.** |
+
+> [!IMPORTANT]
+> **Zero Permissões de Escrita:** O Okami DriveHUB não solicita o escopo completo `drive` nem escopos de criação/modificação (`drive.file`). O usuário mantém controle total e seus arquivos nunca são alterados.
+
+### 2. Estratégia de Segurança dos Tokens
+
+A segurança dos tokens de acesso segue uma política rígida de **tolerância zero** para vazamento de credenciais:
+
+- **Tokens Exclusivamente em Memória (RAM):** O access token é mantido apenas em variáveis voláteis do módulo [`tokenStore.ts`](src/services/auth/tokenStore.ts).
+- **Sem Persistência:** O token **nunca** é gravado em `localStorage`, `sessionStorage`, `IndexedDB`, cookies ou URLs.
+- **Prevenção de Vazamento em Logs:** O token nunca é impresso no console ou incluído em mensagens de erro.
+- **Controle de Expiração Ativo:** O tempo limite do token (geralmente 3599 segundos) é rastreado com margem de segurança de 30 segundos. Ao expirar, o token é descartado e a interface notifica o usuário.
+- **Revogação no Logout:** Ao desconectar, o aplicativo invoca `google.accounts.oauth2.revoke()` para invalidar o token nos servidores da Google antes de limpar a memória local.
+- **Sem Client Secret:** O frontend utiliza exclusivamente o Client ID público. O Client Secret nunca é exigido nem deve ser inserido no código.
+
+### 3. Como Configurar o Google Cloud Console
+
+Para habilitar a autenticação no seu ambiente local e na URL pública do GitHub Pages:
+
+#### Passo 1: Criar o Projeto e Ativar a API
+
+1. Acesse o [Google Cloud Console](https://console.cloud.google.com/).
+2. Crie um novo projeto ou selecione um existente (ex.: `Okami-DriveHUB`).
+3. Vá em **APIs e Serviços > Biblioteca**.
+4. Pesquise por **Google Drive API** e clique em **Ativar**.
+
+#### Passo 2: Configurar a Tela de Consentimento OAuth
+
+1. Vá em **APIs e Serviços > Tela de consentimento OAuth**.
+2. Selecione o tipo de usuário: **Externo** (ou Interno para Google Workspace).
+3. Preencha as informações obrigatórias:
+   - Nome do aplicativo: `Okami DriveHUB`
+   - E-mail de suporte do usuário: seu e-mail
+   - Dados de contato do desenvolvedor: seu e-mail
+4. Na etapa **Escopos**, adicione:
+   - `.../auth/drive.metadata.readonly`
+   - `.../auth/userinfo.email`
+   - `.../auth/userinfo.profile`
+   - `openid`
+5. Na etapa **Usuários de teste**, adicione a sua própria conta Google pessoal que você usará para testar a aplicação.
+
+#### Passo 3: Criar as Credenciais OAuth 2.0
+
+1. Vá em **APIs e Serviços > Credenciais > Criar Credenciais > ID do cliente OAuth**.
+2. Selecione o **Tipo de aplicativo:** `Aplicativo da Web` (Web Application).
+3. Defina o Nome: `Okami DriveHUB Frontend`.
+4. Em **Origens JavaScript autorizadas** (Authorized JavaScript origins), adicione:
+   - `http://localhost:5173` (Ambiente de desenvolvimento padrão do Vite)
+   - `http://localhost:4173` (Ambiente de preview local do Vite)
+   - `https://invictor13.github.io` (URL oficial publicada no GitHub Pages)
+5. Em **URIs de redirecionamento autorizados**: Deixe em branco (o GIS Token Model utiliza popups com comunicação via `postMessage`, dispensando redirecionamento de URL).
+6. Clique em **Criar** e copie o **ID do cliente** gerado (formato `*.apps.googleusercontent.com`).
+
+#### Passo 4: Configurar o Arquivo `.env.local`
+
+Na raiz do projeto local, crie o arquivo `.env.local` (ignorado pelo Git):
+
+```bash
+VITE_GOOGLE_CLIENT_ID=seu_client_id_aqui.apps.googleusercontent.com
+```
+
+### 4. Limitações do Modelo no Navegador
+
+- **Duração do Token:** Os tokens de acesso emitidos pelo fluxo implícito do Google Identity Services expiram em 1 hora.
+- **Ausência de Refresh Tokens em SPAs:** Por diretrizes de segurança da especificação OAuth 2.0 para clientes públicos (navegadores sem backend), refresh tokens de longa duração não são emitidos no frontend.
+- **Reautenticação:** Quando a sessão expira, a aplicação transita suavemente para o estado desconectado e o usuário pode reautenticar clicando no botão "Conectar Conta Google".
 
 ---
 
@@ -197,7 +280,8 @@ Okami_DriveHUB/
 ├── src/
 │   ├── App.tsx               # Orquestrador de layout e zonas de navegação
 │   ├── main.tsx              # Bootstrap da aplicação no DOM
-│   ├── auth/                 # [PR04] Integração com Google Identity Services (GIS)
+│   ├── vite-env.d.ts         # Tipagem estrita de variáveis de ambiente do Vite
+│   ├── auth/                 # Camada de autenticação re-exportada
 │   ├── components/
 │   │   ├── common/           # Componentes atômicos reutilizáveis (Badge, ErrorBoundary)
 │   │   ├── layout/           # Componentes estruturais (SystemHeader, BottomDock)
@@ -207,6 +291,11 @@ Okami_DriveHUB/
 │   ├── pages/
 │   │   └── HomeView.tsx      # Palco central institucional e de estado de conexão
 │   ├── services/
+│   │   ├── auth/             # Serviço oficial Google Identity Services (GIS)
+│   │   │   ├── authContext.tsx   # Contexto e hook useAuth()
+│   │   │   ├── gisLoader.ts      # Carregamento seguro da biblioteca oficial GIS
+│   │   │   ├── googleAuthService.ts # OAuth 2.0 Token Client e perfil
+│   │   │   └── tokenStore.ts     # Armazenamento de tokens em memória volátil (RAM)
 │   │   ├── drive/            # [PR05] Cliente da API v3 do Google Drive
 │   │   ├── audio/            # [PR07] Sintetizador Web Audio API estilo console
 │   │   ├── canvas/           # [PR07] Partículas e ondas interativas a 60 FPS
@@ -215,9 +304,10 @@ Okami_DriveHUB/
 │   ├── styles/
 │   │   └── index.css         # Diretivas Tailwind, variáveis CSS e efeitos glass
 │   ├── types/                # Contratos estritos de domínio
-│   │   ├── auth.ts           # Contratos de sessão e autenticação
+│   │   ├── auth.ts           # Contratos de sessão, contexto e autenticação
 │   │   ├── bookmarks.ts      # Contratos de atalhos web locais
 │   │   ├── drive.ts          # Metadados e respostas oficiais do Google Drive API v3
+│   │   ├── google.d.ts       # Declarações de tipos oficiais do Google Identity Services
 │   │   ├── index.ts          # Exportação centralizada dos tipos
 │   │   ├── sync.ts           # Estados e contratos de sincronização
 │   │   └── ui.ts             # Zonas de navegação e preferências do usuário
@@ -231,6 +321,11 @@ Okami_DriveHUB/
     ├── sanitizers.test.ts    # Testes de sanitização de URLs, nomes e strings HTML
     ├── setup.ts              # Configuração do ambiente com testing-library
     ├── validators.test.ts    # Testes dos validadores Zod da Google Drive API
+    ├── components/
+    │   └── AuthIntegration.test.tsx # Testes de integração de interface e auth
+    ├── services/
+    │   ├── googleAuthService.test.ts # Testes do serviço GIS e fluxos OAuth
+    │   └── tokenStore.test.ts        # Testes de segurança de tokens em memória RAM
     └── mocks/
         └── driveMocks.ts     # Mocks isolados exclusivamente para testes automatizados
 ```
@@ -243,7 +338,7 @@ Okami_DriveHUB/
 - [x] **PR02 — Fundação Técnica, Tooling Moderno e Estrutura Modular**
 - [x] **PR03 — Contratos TypeScript, Sanitização e Higienização de Dados**
 - [x] **PR03.1 — Preparação e Deploy no GitHub Pages**
-- [ ] **PR04 — Camada de Autenticação Segura (Google Identity Services)**
+- [x] **PR04 — Camada de Autenticação Segura (Google Identity Services)**
 - [ ] **PR05 — Serviço de Integração Real com Google Drive API v3**
 - [ ] **PR06 — Gerenciamento de Estado Reativo e Cache Local**
 - [ ] **PR07 — Componentes Core e Experiência Horizon OS (Nintendo Switch UX)**
