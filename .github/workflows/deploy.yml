@@ -1,0 +1,76 @@
+name: Deploy Okami DriveHUB to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Permissões estritas necessárias para publicação no GitHub Pages
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Evita deploys simultâneos conflitantes
+concurrency:
+  group: 'pages'
+  cancel-in-progress: false
+
+jobs:
+  validate-and-build:
+    name: Validar e Construir
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do Repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js (LTS)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Instalar Dependências Limpas
+        run: npm ci
+
+      - name: Verificação Estrita de Tipos (TypeScript)
+        run: npm run typecheck
+
+      - name: Análise Estática de Código (ESLint)
+        run: npm run lint
+
+      - name: Execução da Suíte de Testes (Vitest)
+        run: npm run test
+
+      - name: Verificação de Padronização (Prettier)
+        run: npm run format:check
+
+      - name: Configurar GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Compilar Aplicação (Vite Build)
+        run: npm run build
+
+      - name: Upload de Artefato para GitHub Pages
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: './dist'
+
+  deploy:
+    name: Publicar no GitHub Pages
+    needs: validate-and-build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Realizar Deploy no GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+

@@ -83,4 +83,3 @@ describe('Integridade de Dados e Separação de Domínio (PR03)', () => {
     expect(minimalFile.thumbnailLink).toBeUndefined();
   });
 });
-

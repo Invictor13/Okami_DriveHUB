@@ -12,4 +12,3 @@ export interface BookmarkItem {
   color?: string;
   createdAt: string; // ISO 8601
 }
-

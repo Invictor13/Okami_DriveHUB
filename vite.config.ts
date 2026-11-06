@@ -4,6 +4,7 @@ import path from 'path';
 
 // https://vite.dev/config/
 export default defineConfig({
+  base: '/Okami_DriveHUB/',
   plugins: [react()],
   resolve: {
     alias: {

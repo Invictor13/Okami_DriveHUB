@@ -130,6 +130,37 @@ npm run build
 
 ---
 
+## 🌐 Publicação e Deploy no GitHub Pages
+
+O **Okami DriveHUB** está configurado para compilação e deploy contínuo (CI/CD) automatizado no GitHub Pages através do GitHub Actions.
+
+- **URL Pública Oficial:** [https://invictor13.github.io/Okami_DriveHUB/](https://invictor13.github.io/Okami_DriveHUB/)
+- **Workflow de Deploy:** [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml)
+
+### Como Funciona a Publicação
+
+1. **Pipeline Automatizado:** A cada `push` na branch `main` (ou disparo manual via `workflow_dispatch`), o GitHub Actions executa uma esteira completa de validação:
+   - Instalação limpa de dependências com `npm ci`
+   - Verificação estrita de tipos com `npm run typecheck` (`tsc --noEmit`)
+   - Análise estática com `npm run lint` (`eslint .`)
+   - Suíte de testes automatizados com `npm run test` (`vitest run`)
+   - Verificação de conformidade de código com `npm run format:check` (`prettier --check`)
+   - Compilação estática de produção com `npm run build` (`vite build`)
+2. **Artefato Publicado Exclusivo:** O deploy publica **exclusivamente** os arquivos estáticos gerados na pasta `dist/` através das actions oficiais `actions/upload-pages-artifact` e `actions/deploy-pages`. O código-fonte de desenvolvimento, testes e arquivos de ambiente não são expostos.
+3. **Caminho Base (`base`):** O Vite está configurado com `base: '/Okami_DriveHUB/'` no `vite.config.ts`, assegurando que scripts, estilos e recursos estáticos sejam resolvidos perfeitamente no domínio do GitHub Pages.
+4. **Monitoramento:** O status de cada compilação e publicação pode ser acompanhado diretamente na aba **Actions** do repositório no GitHub.
+
+> [!WARNING]
+> **Por que abrir o `index.html` com duplo clique no Windows não funciona?**
+> O Okami DriveHUB é uma Single Page Application (SPA) moderna baseada em **módulos ECMAScript (ESM)** e arquitetura de build. Se você tentar abrir o arquivo `index.html` (seja o da raiz ou o gerado em `dist/`) diretamente pelo Windows Explorer via protocolo `file://`, o navegador bloqueará o carregamento dos scripts por políticas de segurança CORS e não resolverá os caminhos configurados (`/Okami_DriveHUB/assets/...`).
+>
+> Para executar ou inspecionar localmente:
+>
+> - **Ambiente de Desenvolvimento:** Execute `npm run dev` e acesse o servidor HMR local.
+> - **Pré-visualização do Pacote de Produção:** Execute `npm run build` seguido de `npm run preview`.
+
+---
+
 ## 📜 Scripts Disponíveis
 
 | Comando                | Descrição                                                                       |
@@ -211,6 +242,7 @@ Okami_DriveHUB/
 - [x] **PR01 — Auditoria Técnica e Planejamento da Arquitetura**
 - [x] **PR02 — Fundação Técnica, Tooling Moderno e Estrutura Modular**
 - [x] **PR03 — Contratos TypeScript, Sanitização e Higienização de Dados**
+- [x] **PR03.1 — Preparação e Deploy no GitHub Pages**
 - [ ] **PR04 — Camada de Autenticação Segura (Google Identity Services)**
 - [ ] **PR05 — Serviço de Integração Real com Google Drive API v3**
 - [ ] **PR06 — Gerenciamento de Estado Reativo e Cache Local**
