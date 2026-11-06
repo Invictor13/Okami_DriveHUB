@@ -3,4 +3,5 @@
  */
 
 export * from './driveApiService';
+export * from './driveCache';
 export * from './useDriveFiles';

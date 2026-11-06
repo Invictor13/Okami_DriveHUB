@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   fetchDriveFiles,
   buildFilesListUrl,
+  buildDriveQuery,
+  escapeDriveQueryTerm,
   GOOGLE_DRIVE_FILES_API,
   DEFAULT_DRIVE_FIELDS,
 } from '@/services/drive/driveApiService';
@@ -53,6 +55,64 @@ describe('driveApiService — Cliente HTTP da Google Drive API v3 (PR05)', () =>
       const parsed = new URL(urlStr);
 
       expect(parsed.searchParams.get('pageToken')).toBe('token_page_next_123');
+    });
+
+    it('escapa devidamente apóstrofos e barras invertidas em escapeDriveQueryTerm', () => {
+      expect(escapeDriveQueryTerm("relatorio d'ouro")).toBe(
+        "relatorio d\\'ouro"
+      );
+      expect(escapeDriveQueryTerm('pasta\\subpasta')).toBe('pasta\\\\subpasta');
+      expect(escapeDriveQueryTerm("malicious' or '1'='1")).toBe(
+        "malicious\\' or \\'1\\'=\\'1"
+      );
+      expect(escapeDriveQueryTerm('linha1\nlinha2\tlinha3')).toBe(
+        'linha1 linha2 linha3'
+      );
+    });
+
+    it('constrói consulta com termo de busca restrita à pasta ativa', () => {
+      const q = buildDriveQuery({
+        parentId: 'folder_abc_123',
+        searchTerm: 'auditoria 2026',
+        restrictToFolder: true,
+      });
+
+      expect(q).toBe(
+        "'folder_abc_123' in parents and name contains 'auditoria 2026' and trashed = false"
+      );
+    });
+
+    it('constrói consulta de busca global em todo o Drive quando restrictToFolder for false', () => {
+      const q = buildDriveQuery({
+        parentId: 'root',
+        searchTerm: 'contrato',
+        restrictToFolder: false,
+      });
+
+      expect(q).toBe("name contains 'contrato' and trashed = false");
+    });
+
+    it('constrói consulta segura com caracteres especiais no termo de busca', () => {
+      const q = buildDriveQuery({
+        parentId: "pasta'com'aspas",
+        searchTerm: "arquivo'secreto\\2026",
+        restrictToFolder: true,
+      });
+
+      expect(q).toBe(
+        "'pasta\\'com\\'aspas' in parents and name contains 'arquivo\\'secreto\\\\2026' and trashed = false"
+      );
+    });
+
+    it('aplica filtro de MIME type com escape na consulta da API', () => {
+      const q = buildDriveQuery({
+        parentId: 'root',
+        mimeTypeFilter: 'application/pdf',
+      });
+
+      expect(q).toBe(
+        "'root' in parents and trashed = false and mimeType = 'application/pdf'"
+      );
     });
   });
 

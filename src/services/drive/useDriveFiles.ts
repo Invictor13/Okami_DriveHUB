@@ -1,8 +1,15 @@
 /**
- * Hook de Gerenciamento de Arquivos e Navegação no Google Drive — Okami DriveHUB
+ * Hook de Gerenciamento de Arquivos, Busca e Navegação no Google Drive — Okami DriveHUB
  *
- * Encapsula o ciclo de vida da listagem real, paginação, navegação por pastas
- * e estados reativos de sincronização.
+ * Encapsula o ciclo de vida da listagem real, paginação, busca com debounce,
+ * cache volátil em memória e estados reativos de sincronização.
+ *
+ * REGRAS INEGOCIÁVEIS:
+ * - Operações exclusivamente de LEITURA.
+ * - Deduplicação rigorosa pelo ID canônico original da Google Drive API v3.
+ * - Cache em memória volátil via driveCache (zero tokens ou persistência em disco).
+ * - Tratamento seguro de busca com expressão 'name contains' da Drive API.
+ * - Descarte imediato de cache e dados ao desconectar a sessão.
  */
 
 import { useState, useCallback, useEffect, useRef } from 'react';
@@ -10,13 +17,14 @@ import { DriveItem } from '@/types/drive';
 import { SyncState, SyncError } from '@/types/sync';
 import { useAuth } from '@/services/auth';
 import { fetchDriveFiles, DriveServiceError } from './driveApiService';
+import { driveCache } from './driveCache';
 
 export interface FolderBreadcrumb {
   id: string;
   name: string;
 }
 
-const ROOT_FOLDER: FolderBreadcrumb = {
+export const ROOT_FOLDER: FolderBreadcrumb = {
   id: 'root',
   name: 'Meu Google Drive',
 };
@@ -28,6 +36,12 @@ export interface UseDriveFilesReturn {
   folderStack: FolderBreadcrumb[];
   nextPageToken: string | undefined;
   isLoadingMore: boolean;
+  searchTerm: string;
+  isSearching: boolean;
+  restrictToFolder: boolean;
+  setSearchTerm: (term: string) => void;
+  setRestrictToFolder: (restrict: boolean) => void;
+  clearSearch: () => void;
   navigateToFolder: (folder: { id: string; name: string }) => Promise<void>;
   navigateUp: () => Promise<void>;
   navigateToBreadcrumb: (index: number) => Promise<void>;
@@ -46,6 +60,13 @@ export function useDriveFiles(): UseDriveFilesReturn {
     ROOT_FOLDER,
   ]);
 
+  // Estados de busca
+  const [searchTerm, setSearchTermState] = useState<string>('');
+  const [restrictToFolder, setRestrictToFolderState] = useState<boolean>(true);
+  const [isSearching, setIsSearching] = useState<boolean>(false);
+
+  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const [syncState, setSyncState] = useState<SyncState>({
     status: session.status === 'connected' ? 'idle' : 'disconnected',
     lastSyncedAt: null,
@@ -57,7 +78,13 @@ export function useDriveFiles(): UseDriveFilesReturn {
   const currentFolderRef = useRef(currentFolder);
   currentFolderRef.current = currentFolder;
 
-  // Carrega os itens da pasta indicada
+  const restrictToFolderRef = useRef(restrictToFolder);
+  restrictToFolderRef.current = restrictToFolder;
+
+  const searchTermRef = useRef(searchTerm);
+  searchTermRef.current = searchTerm;
+
+  // Carrega o conteúdo de uma pasta (com cache em memória volátil)
   const fetchFolderContents = useCallback(
     async (folderId: string, isRefresh = false) => {
       if (session.status !== 'connected') {
@@ -68,6 +95,25 @@ export function useDriveFiles(): UseDriveFilesReturn {
         }));
         setItems([]);
         return;
+      }
+
+      // Se não for atualização forçada (refresh), verificar se já existe no cache em memória
+      if (!isRefresh) {
+        const cached = driveCache.get(folderId);
+        if (cached) {
+          setItems(cached.items);
+          setNextPageToken(cached.nextPageToken);
+          setSyncState({
+            status: 'synchronized',
+            lastSyncedAt: new Date(cached.cachedAt).toISOString(),
+            itemCount: cached.items.length,
+            error: null,
+          });
+          return;
+        }
+      } else {
+        // Se for refresh forçado, invalidar a entrada do cache da pasta
+        driveCache.invalidate(folderId);
       }
 
       setSyncState((prev) => ({
@@ -86,6 +132,9 @@ export function useDriveFiles(): UseDriveFilesReturn {
         }
         const uniqueFiles = Array.from(itemsMap.values());
 
+        // Salva no cache em memória volátil
+        driveCache.set(folderId, uniqueFiles, response.nextPageToken);
+
         setItems(uniqueFiles);
         setNextPageToken(response.nextPageToken);
 
@@ -98,7 +147,6 @@ export function useDriveFiles(): UseDriveFilesReturn {
       } catch (err) {
         const driveErr = err as DriveServiceError;
 
-        // Se for erro de autenticação (HTTP 401), deslogar localmente
         if (driveErr.code === 'unauthenticated') {
           void logout();
         }
@@ -122,7 +170,111 @@ export function useDriveFiles(): UseDriveFilesReturn {
     [session.status, logout]
   );
 
-  // Carrega mais itens (próxima página) mantendo os itens já carregados
+  // Executa busca direta na Google Drive API
+  const executeSearch = useCallback(
+    async (term: string, restrict: boolean) => {
+      if (session.status !== 'connected') return;
+
+      const trimmed = term.trim();
+      if (!trimmed) {
+        setIsSearching(false);
+        void fetchFolderContents(currentFolderRef.current.id);
+        return;
+      }
+
+      setIsSearching(true);
+      setSyncState((prev) => ({
+        ...prev,
+        status: 'loading',
+        error: null,
+      }));
+
+      try {
+        const response = await fetchDriveFiles({
+          parentId: currentFolderRef.current.id,
+          searchTerm: trimmed,
+          restrictToFolder: restrict,
+        });
+
+        const itemsMap = new Map<string, DriveItem>();
+        for (const file of response.files) {
+          itemsMap.set(file.id, file);
+        }
+        const uniqueFiles = Array.from(itemsMap.values());
+
+        setItems(uniqueFiles);
+        setNextPageToken(response.nextPageToken);
+
+        setSyncState({
+          status: 'synchronized',
+          lastSyncedAt: new Date().toISOString(),
+          itemCount: uniqueFiles.length,
+          error: null,
+        });
+      } catch (err) {
+        const driveErr = err as DriveServiceError;
+
+        if (driveErr.code === 'unauthenticated') {
+          void logout();
+        }
+
+        const syncError: SyncError = {
+          code: driveErr.code,
+          message: driveErr.message,
+          timestamp: new Date().toISOString(),
+          retryable:
+            driveErr.code !== 'unauthenticated' &&
+            driveErr.code !== 'forbidden',
+        };
+
+        setSyncState((prev) => ({
+          ...prev,
+          status: 'error',
+          error: syncError,
+        }));
+      }
+    },
+    [session.status, logout, fetchFolderContents]
+  );
+
+  // Define o termo de busca com debounce de 350ms
+  const setSearchTerm = useCallback(
+    (term: string) => {
+      setSearchTermState(term);
+
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+      }
+
+      debounceTimerRef.current = setTimeout(() => {
+        void executeSearch(term, restrictToFolderRef.current);
+      }, 350);
+    },
+    [executeSearch]
+  );
+
+  // Altera restrição da busca à pasta atual
+  const setRestrictToFolder = useCallback(
+    (restrict: boolean) => {
+      setRestrictToFolderState(restrict);
+      if (searchTermRef.current.trim()) {
+        void executeSearch(searchTermRef.current, restrict);
+      }
+    },
+    [executeSearch]
+  );
+
+  // Limpa a busca e restaura o conteúdo da pasta
+  const clearSearch = useCallback(() => {
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+    }
+    setSearchTermState('');
+    setIsSearching(false);
+    void fetchFolderContents(currentFolderRef.current.id);
+  }, [fetchFolderContents]);
+
+  // Carrega mais itens (próxima página)
   const loadNextPage = useCallback(async () => {
     if (!nextPageToken || isLoadingMore || session.status !== 'connected') {
       return;
@@ -131,22 +283,32 @@ export function useDriveFiles(): UseDriveFilesReturn {
     setIsLoadingMore(true);
 
     try {
+      const activeSearch = searchTermRef.current.trim();
       const response = await fetchDriveFiles({
         parentId: currentFolderRef.current.id,
         pageToken: nextPageToken,
+        searchTerm: activeSearch || undefined,
+        restrictToFolder: restrictToFolderRef.current,
       });
 
       setItems((prevItems) => {
         const itemsMap = new Map<string, DriveItem>();
-        // Preserva os itens já existentes
         for (const item of prevItems) {
           itemsMap.set(item.id, item);
         }
-        // Adiciona novos itens da página sem duplicações
         for (const item of response.files) {
           itemsMap.set(item.id, item);
         }
         const updated = Array.from(itemsMap.values());
+
+        // Se não for busca, atualizar o cache da pasta com a listagem ampliada
+        if (!activeSearch) {
+          driveCache.set(
+            currentFolderRef.current.id,
+            updated,
+            response.nextPageToken
+          );
+        }
 
         setSyncState((prevSync) => ({
           ...prevSync,
@@ -176,18 +338,31 @@ export function useDriveFiles(): UseDriveFilesReturn {
     }
   }, [nextPageToken, isLoadingMore, session.status]);
 
-  // Navega para dentro de uma pasta filha
+  // Navega para uma subpasta
   const navigateToFolder = useCallback(
     async (folder: { id: string; name: string }) => {
+      // Ao navegar, limpar busca ativa
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+      }
+      setSearchTermState('');
+      setIsSearching(false);
+
       setFolderStack((prev) => [...prev, folder]);
       await fetchFolderContents(folder.id);
     },
     [fetchFolderContents]
   );
 
-  // Retorna para a pasta pai (nível acima)
+  // Retorna um nível na hierarquia de pastas
   const navigateUp = useCallback(async () => {
     if (folderStack.length <= 1) return;
+
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+    }
+    setSearchTermState('');
+    setIsSearching(false);
 
     const newStack = folderStack.slice(0, folderStack.length - 1);
     setFolderStack(newStack);
@@ -195,10 +370,16 @@ export function useDriveFiles(): UseDriveFilesReturn {
     await fetchFolderContents(targetFolder.id);
   }, [folderStack, fetchFolderContents]);
 
-  // Navega diretamente para um nível do breadcrumb
+  // Navega para um ponto arbitrário do breadcrumb
   const navigateToBreadcrumb = useCallback(
     async (index: number) => {
       if (index < 0 || index >= folderStack.length) return;
+
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+      }
+      setSearchTermState('');
+      setIsSearching(false);
 
       const newStack = folderStack.slice(0, index + 1);
       setFolderStack(newStack);
@@ -208,16 +389,32 @@ export function useDriveFiles(): UseDriveFilesReturn {
     [folderStack, fetchFolderContents]
   );
 
-  // Atualiza a listagem da pasta atual
+  // Atualização manual da pasta
   const refresh = useCallback(async () => {
-    await fetchFolderContents(currentFolderRef.current.id, true);
-  }, [fetchFolderContents]);
+    if (searchTermRef.current.trim()) {
+      await executeSearch(searchTermRef.current, restrictToFolderRef.current);
+    } else {
+      await fetchFolderContents(currentFolderRef.current.id, true);
+    }
+  }, [fetchFolderContents, executeSearch]);
 
-  // Dispara o carregamento inicial da raiz assim que o usuário se conectar
+  // Limpeza de timers no desmonte
+  useEffect(() => {
+    return () => {
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+      }
+    };
+  }, []);
+
+  // Efeito de conexão e desconexão da sessão
   useEffect(() => {
     if (session.status === 'connected') {
       void fetchFolderContents(currentFolderRef.current.id);
     } else {
+      // Limpa integralmente o cache em memória no logout
+      driveCache.clear();
+
       setSyncState((prev) => ({
         ...prev,
         status: 'disconnected',
@@ -227,6 +424,8 @@ export function useDriveFiles(): UseDriveFilesReturn {
       setItems([]);
       setFolderStack([ROOT_FOLDER]);
       setNextPageToken(undefined);
+      setSearchTermState('');
+      setIsSearching(false);
     }
   }, [session.status, fetchFolderContents]);
 
@@ -237,6 +436,12 @@ export function useDriveFiles(): UseDriveFilesReturn {
     folderStack,
     nextPageToken,
     isLoadingMore,
+    searchTerm,
+    isSearching,
+    restrictToFolder,
+    setSearchTerm,
+    setRestrictToFolder,
+    clearSearch,
     navigateToFolder,
     navigateUp,
     navigateToBreadcrumb,

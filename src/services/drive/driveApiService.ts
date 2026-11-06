@@ -10,6 +10,15 @@
  * - Zero tokens em URLs, parâmetros de busca, logs ou mensagens de erro.
  * - Validação em tempo de execução via Zod (validateDriveListResponse).
  * - Em HTTP 401, descartar imediatamente o token da memória volátil.
+ *
+ * LIMITAÇÃO DOCUMENTADA — DRIVES COMPARTILHADOS (SHARED DRIVES):
+ * - O identificador canônico 'root' refere-se estritamente à raiz do "Meu Drive" (My Drive) do usuário.
+ * - Drives Compartilhados (Shared Drives) possuem IDs próprios e não são filhos diretos de 'root'.
+ * - Os parâmetros supportsAllDrives=true e includeItemsFromAllDrives=true são incluídos para que itens
+ *   pertencentes a drives compartilhados possam ser acessados caso o usuário busque por nome ou acesse
+ *   uma subpasta de unidade compartilhada diretamente pelo seu ID canônico.
+ * - A descoberta/listagem de unidades compartilhadas de primeiro nível não é realizada pelo endpoint
+ *   files.list na raiz 'root', necessitando do endpoint específico drives.list (não implementado nesta fase).
  */
 
 import { DriveListResponse } from '@/types/drive';
@@ -32,11 +41,12 @@ export const DEFAULT_DRIVE_FIELDS = [
 ].join(', ');
 
 /**
- * Opções de consulta para listagem de arquivos
+ * Opções de consulta para listagem e busca de arquivos
  */
 export interface FetchDriveFilesOptions {
   /**
-   * ID da pasta pai (ex: 'root' para o diretório raiz ou ID canônico opaco de uma pasta)
+   * ID da pasta pai (ex: 'root' para o diretório raiz ou ID canônico opaco de uma pasta).
+   * Padrão: 'root'
    */
   parentId?: string;
   /**
@@ -52,8 +62,22 @@ export interface FetchDriveFilesOptions {
    */
   orderBy?: string;
   /**
-   * Consulta personalizada no formato Google Drive Search Query.
-   * Se informada, substitui o filtro padrão de parentId.
+   * Termo de busca textual por nome (gera 'name contains ...').
+   * Sanitizado e escapado automaticamente contra injeção de parâmetros.
+   */
+  searchTerm?: string;
+  /**
+   * Se true e searchTerm fornecido, restringe a busca aos itens filhos de parentId.
+   * Se false e searchTerm fornecido, busca em todo o Drive visível do usuário.
+   * Padrão: true
+   */
+  restrictToFolder?: boolean;
+  /**
+   * Filtro opcional por MIME type específico na API (ex: 'application/vnd.google-apps.folder')
+   */
+  mimeTypeFilter?: string;
+  /**
+   * Consulta personalizada legada mantida para compatibilidade em testes existentes.
    */
   customQuery?: string;
 }
@@ -94,23 +118,71 @@ export function createDriveError(
 }
 
 /**
+ * Escapa com segurança caracteres especiais em valores literais da Google Drive API Search Query (q).
+ * Strings na sintaxe de consulta da Drive API são delimitadas por aspas simples (').
+ * Aspas simples e barras invertidas devem ser escapadas com barra invertida (\).
+ * Quebras de linha e caracteres de controle são normalizados para espaços.
+ */
+export function escapeDriveQueryTerm(term: string): string {
+  return term
+    .replace(/[\r\n\t]/g, ' ')
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'");
+}
+
+/**
+ * Constrói a expressão de consulta (q) da Google Drive API de forma segura e estrita.
+ */
+export function buildDriveQuery(options: FetchDriveFilesOptions = {}): string {
+  const {
+    parentId = 'root',
+    searchTerm,
+    restrictToFolder = true,
+    mimeTypeFilter,
+    customQuery,
+  } = options;
+
+  if (customQuery) {
+    return customQuery;
+  }
+
+  const clauses: string[] = [];
+  const cleanParentId = parentId.trim() || 'root';
+  const cleanSearchTerm = searchTerm?.trim();
+
+  if (cleanSearchTerm) {
+    if (restrictToFolder) {
+      const escapedParent = escapeDriveQueryTerm(cleanParentId);
+      clauses.push(`'${escapedParent}' in parents`);
+    }
+    const escapedTerm = escapeDriveQueryTerm(cleanSearchTerm);
+    clauses.push(`name contains '${escapedTerm}'`);
+  } else {
+    const escapedParent = escapeDriveQueryTerm(cleanParentId);
+    clauses.push(`'${escapedParent}' in parents`);
+  }
+
+  clauses.push('trashed = false');
+
+  if (mimeTypeFilter) {
+    const escapedMime = escapeDriveQueryTerm(mimeTypeFilter.trim());
+    clauses.push(`mimeType = '${escapedMime}'`);
+  }
+
+  return clauses.join(' and ');
+}
+
+/**
  * Constrói a URL completa para a requisição files.list
  */
 export function buildFilesListUrl(
   options: FetchDriveFilesOptions = {}
 ): string {
-  const {
-    parentId = 'root',
-    pageToken,
-    pageSize = 50,
-    orderBy = 'folder, name',
-    customQuery,
-  } = options;
+  const { pageToken, pageSize = 50, orderBy = 'folder, name' } = options;
 
   const url = new URL(GOOGLE_DRIVE_FILES_API);
 
-  // Consulta padrão: itens não excluídos pertencentes à pasta pai especificada
-  const q = customQuery ?? `'${parentId}' in parents and trashed = false`;
+  const q = buildDriveQuery(options);
 
   url.searchParams.set('q', q);
   url.searchParams.set('fields', DEFAULT_DRIVE_FIELDS);
@@ -170,76 +242,75 @@ export async function fetchDriveFiles(
     );
   }
 
-  // Tratamento específico de códigos de resposta HTTP
-  if (!response.ok) {
-    if (response.status === 401) {
-      // REGRA INEGOCIÁVEL: Em 401, limpar token e exigir reconexão
-      tokenStore.clearToken();
-      throw createDriveError(
-        'unauthenticated',
-        'Sua sessão expirou ou o token de acesso foi revogado. Conecte-se novamente.',
-        401
-      );
-    }
-
-    if (response.status === 403) {
-      throw createDriveError(
-        'forbidden',
-        'Acesso negado aos arquivos solicitados no Google Drive.',
-        403
-      );
-    }
-
-    if (response.status === 404) {
-      throw createDriveError(
-        'not_found',
-        'A pasta ou diretório solicitado não foi encontrado no Google Drive.',
-        404
-      );
-    }
-
-    if (response.status === 429) {
-      throw createDriveError(
-        'rate_limit',
-        'Limite de requisições excedido. Aguarde alguns instantes e tente novamente.',
-        429
-      );
-    }
-
-    if (response.status >= 500) {
-      throw createDriveError(
-        'server_error',
-        'Os servidores da Google Drive API estão temporariamente indisponíveis. Tente mais tarde.',
-        response.status
-      );
-    }
-
+  // Tratamento específico por código de status HTTP
+  if (response.status === 401) {
+    // Descarta o token expirado/revogado da memória volátil
+    tokenStore.clearToken();
     throw createDriveError(
-      'unknown',
-      `Erro retornado pela Google Drive API (HTTP ${response.status}).`,
+      'unauthenticated',
+      'Sessão do Google expirada ou token revogado. Por favor, autentique-se novamente.',
+      401
+    );
+  }
+
+  if (response.status === 403) {
+    throw createDriveError(
+      'forbidden',
+      'Acesso negado ou permissão insuficiente para acessar o Google Drive.',
+      403
+    );
+  }
+
+  if (response.status === 404) {
+    throw createDriveError(
+      'not_found',
+      'Pasta ou recurso não encontrado no Google Drive.',
+      404
+    );
+  }
+
+  if (response.status === 429) {
+    throw createDriveError(
+      'rate_limit',
+      'Limite de requisições por segundo da Google Drive API atingido. Aguarde alguns instantes.',
+      429
+    );
+  }
+
+  if (response.status >= 500) {
+    throw createDriveError(
+      'server_error',
+      `Serviços do Google temporariamente indisponíveis (HTTP ${response.status}). Tente novamente mais tarde.`,
       response.status
     );
   }
 
-  // Parse do corpo JSON
-  let rawJson: unknown;
+  if (!response.ok) {
+    throw createDriveError(
+      'unknown',
+      `Resposta inesperada da Google Drive API (HTTP ${response.status}).`,
+      response.status
+    );
+  }
+
+  // Parse e validação estrita do payload JSON com Zod
+  let rawData: unknown;
   try {
-    rawJson = await response.json();
+    rawData = await response.json();
   } catch (err) {
     throw createDriveError(
       'validation_error',
-      'A resposta da Google Drive API não contém um JSON válido.',
+      'Resposta da Google Drive API não pôde ser interpretada como JSON.',
       response.status,
       err instanceof Error ? err.message : undefined
     );
   }
 
-  // Validação em tempo de execução com Schemas Zod
-  const validation = validateDriveListResponse(rawJson);
+  const validation = validateDriveListResponse(rawData);
   if (!validation.success) {
     throw createDriveError(
       'validation_error',
-      'Os dados retornados pela Google Drive API violam os contratos de domínio.',
+      'Dados retornados pela Google Drive API violam os contratos de domínio.',
       response.status,
       validation.error
     );

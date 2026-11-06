@@ -9,7 +9,7 @@
 O **Okami DriveHUB** é um hub de arquivos e navegação pessoal moderno, responsivo e modular. Ele une fluidez visual, navegação otimizada por teclado e controles de console à organização de arquivos e pastas reais do usuário no Google Drive.
 
 > [!NOTE]
-> **Situação Atual da Integração (PR05):** A primeira integração funcional com a **Google Drive API v3** foi concluída com sucesso. A listagem de arquivos, pastas e atalhos reais em modo estrito de leitura (`drive.metadata.readonly`), navegação em profundidade com breadcrumbs e paginação contínua (`nextPageToken`) está plenamente operacional. Nenhum dado simulado ou arquivo fictício é apresentado.
+> **Situação Atual da Integração (PR06):** Busca por nome com debounce, filtros avançados por tipos MIME, alternância de visualização (Grade e Lista Compacta), ordenação dinâmica e cache em memória volátil de pastas visitadas plenamente integrados à **Google Drive API v3** real. A precisão do campo `size` foi reforçada com `BigInt` (int64) e todas as consultas são rigorosamente sanitizadas contra injeção de parâmetros. Nenhum dado simulado ou arquivo fictício é apresentado.
 
 ---
 
@@ -200,6 +200,68 @@ A Google Drive API v3 representa o tamanho de arquivos como strings numéricas i
 
 ---
 
+## 🔍 Busca, Filtros, Visualização e Cache em Memória (PR06)
+
+A **PR06** expandiu o explorador de arquivos com busca textual em tempo real, filtros dinâmicos por tipo MIME, alternância de modos de exibição, ordenação flexível e cache em memória volátil de diretórios visitados.
+
+### 1. FASE 0: Integridade de Dados, Limites int64 e Sanitização de Consultas
+
+- **Precisão Estrita de 64 bits (`size` e `formatBytes`):**
+  - O contrato preserva `size` como `string`.
+  - O validador [`DriveSizeSchema`](src/utils/validators.ts) valida o limite superior de inteiros de 64 bits (`9223372036854775807`), rejeita valores maiores que o limite, rejeita números de ponto flutuante (_floats_) e rejeita `number` que ultrapassem `Number.MAX_SAFE_INTEGER` para prevenir perda silenciosa de precisão antes do parsing.
+  - A função [`formatBytes()`](src/utils/formatters.ts) foi reescrita utilizando aritmética com `BigInt`, suportando desde Bytes até Exabytes (`EB`) com arredondamento exato e sem conversão direta de números grandes para `Number`.
+- **Prevenção de Injeção de Parâmetros na API (`escapeDriveQueryTerm`):**
+  - Na Google Drive API v3, expressões de busca no parâmetro `q` utilizam aspas simples (`'`). A função `escapeDriveQueryTerm()` escapa adequadamente aspas simples (`\'`), barras invertidas (`\\`) e normaliza quebras de linha/caracteres de controle, neutralizando qualquer tentativa de injeção de parâmetros arbitrários.
+- **Delimitação Documentada de Drives Compartilhados (Shared Drives):**
+  - O identificador `'root'` é estritamente o alias da raiz do "Meu Drive" pessoal do usuário.
+  - Drives Compartilhados não são filhos diretos de `'root'` e possuem identificadores próprios, demandando o endpoint específico `drives.list` para descoberta completa de unidades topo de nível.
+  - Os parâmetros `supportsAllDrives=true` e `includeItemsFromAllDrives=true` permanecem ativos para permitir acesso a itens de unidades compartilhadas via atalhos e busca.
+  - A interface exibe aviso informativo contextualizando o escopo ativo.
+
+### 2. Busca de Arquivos em Tempo Real
+
+- **Debounce de 350ms:** Previne requisições excessivas à Google Drive API enquanto o usuário digita no campo de pesquisa.
+- **Expressão Canônica:** Utiliza a cláusula oficial `name contains '<termo>'` da Google Drive API v3.
+- **Opção de Escopo:** O usuário pode alternar entre busca restrita à pasta ativa (`'${parentId}' in parents and name contains ...`) e busca global nos arquivos visíveis do Drive (`name contains ... and trashed = false`).
+- **Limpeza Rápida:** Botão para limpar a busca instantaneamente e restaurar o conteúdo original da pasta.
+
+### 3. Filtros por Tipo de Arquivo (MIME Types)
+
+Chips interativos permitem filtrar os arquivos sem requisições adicionais desnecessárias:
+
+- **Todos**
+- **Pastas** (`application/vnd.google-apps.folder`)
+- **Documentos** (Google Docs, Word, texto puro)
+- **Planilhas** (Google Sheets, Excel, CSV)
+- **Apresentações** (Google Slides, PowerPoint)
+- **Imagens** (`image/*`)
+- **Vídeos** (`video/*`)
+- **Áudios** (`audio/*`)
+- **PDFs** (`application/pdf`)
+- **Outros** (formatos binários ou extensões diversas)
+
+### 4. Modos de Visualização Alternáveis
+
+- **Grade (Cards):** Cards visuais com ícones semânticos, nome com tooltip, data formatada, tamanho e atalhos com badge.
+- **Lista Compacta (Tabela):** Tabela estruturada com colunas semânticas (_Nome_, _Tipo_, _Modificado em_, _Tamanho_, _Ações_), permitindo navegação em subpastas ao clicar nas linhas.
+
+### 5. Ordenação Dinâmica com Agrupamento de Pastas
+
+- **Opções Disponíveis:** Nome (A-Z), Nome (Z-A), Data mais recente, Data mais antiga, Tamanho crescente e Tamanho decrescente.
+- **Pastas no Topo:** Pastas permanecem sempre agrupadas antes de arquivos para manter a usabilidade padrão de gerenciadores de arquivos.
+- **Tratamento de Itens sem Tamanho:** Itens sem tamanho definido (pastas e Google Docs) são ordenados no final na ordenação por tamanho, sem inventar valores ou atribuir falsos zeros.
+- **Comparação em BigInt:** Ordenação por tamanho compara valores via `BigInt`, prevenindo imprecisões numéricas.
+
+### 6. Cache em Memória Volátil da Sessão (`driveCache`)
+
+- **Armazenamento:** Memória RAM volátil via `Map<string, CachedFolderEntry>` em [`src/services/drive/driveCache.ts`](src/services/drive/driveCache.ts).
+- **Zero Persistência Sensível:** Proibido o uso de `localStorage`, `sessionStorage` ou `IndexedDB` para metadados ou tokens.
+- **TTL de 5 Minutos:** As entradas expiram automaticamente após 5 minutos.
+- **Invalidação Manual:** O botão "Atualizar" descarta o cache da pasta corrente e força nova busca na API.
+- **Limpeza no Logout:** Ao desconectar a conta Google, `driveCache.clear()` descarta imediatamente todos os dados da memória.
+
+---
+
 ## 🛡️ Estratégia de Validação e Sanitização
 
 ### Validação em Tempo de Execução (`src/utils/validators.ts`)
@@ -353,9 +415,10 @@ Okami_DriveHUB/
 │   │   │   ├── gisLoader.ts      # Carregamento seguro da biblioteca oficial GIS
 │   │   │   ├── googleAuthService.ts # OAuth 2.0 Token Client e perfil
 │   │   │   └── tokenStore.ts     # Armazenamento de tokens em memória volátil (RAM)
-│   │   ├── drive/            # [PR05] Cliente HTTP oficial da Google Drive API v3
+│   │   ├── drive/            # [PR05 / PR06] Cliente HTTP oficial da Google Drive API v3
 │   │   │   ├── driveApiService.ts # Cliente de requisições autenticadas (files.list)
-│   │   │   └── useDriveFiles.ts   # Hook de paginação, navegação e sincronização
+│   │   │   ├── driveCache.ts      # [PR06] Cache em memória volátil de pastas visitadas
+│   │   │   └── useDriveFiles.ts   # [PR06] Hook de paginação, busca, filtros e sincronização
 │   │   ├── audio/            # [PR07] Sintetizador Web Audio API estilo console
 │   │   ├── canvas/           # [PR07] Partículas e ondas interativas a 60 FPS
 │   │   └── storage/          # [PR06] Adaptadores de armazenamento local e cache
@@ -386,9 +449,10 @@ Okami_DriveHUB/
     │   └── DriveExplorer.test.tsx   # Testes da interface do explorador de arquivos
     ├── services/
     │   ├── driveApiService.test.ts  # Testes do cliente HTTP da Drive API v3
+    │   ├── driveCache.test.ts       # [PR06] Testes do cache em memória e invalidação
     │   ├── googleAuthService.test.ts # Testes do serviço GIS e fluxos OAuth
     │   ├── tokenStore.test.ts        # Testes de segurança de tokens em memória RAM
-    │   └── useDriveFiles.test.ts     # Testes do hook de navegação e sincronização
+    │   └── useDriveFiles.test.ts     # Testes do hook de navegação, busca e cache
     └── mocks/
         └── driveMocks.ts     # Mocks isolados exclusivamente para testes automatizados
 ```
@@ -403,7 +467,7 @@ Okami_DriveHUB/
 - [x] **PR03.1 — Preparação e Deploy no GitHub Pages**
 - [x] **PR04 — Camada de Autenticação Segura (Google Identity Services)**
 - [x] **PR05 — Serviço de Integração Real com Google Drive API v3**
-- [ ] **PR06 — Gerenciamento de Estado Reativo e Cache Local**
+- [x] **PR06 — Busca, Filtros, Visualização e Ordenação do Drive**
 - [ ] **PR07 — Componentes Core e Experiência Horizon OS (Nintendo Switch UX)**
 - [ ] **PR08 — Módulos Secundários (Explorer, Atalhos Web, Dashboard ADM)**
 - [ ] **PR09 — Cobertura Abrangente de Testes e Pipeline CI/CD**

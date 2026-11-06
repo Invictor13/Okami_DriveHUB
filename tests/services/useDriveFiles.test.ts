@@ -3,14 +3,17 @@ import { renderHook, act, waitFor } from '@testing-library/react';
 import { useDriveFiles } from '@/services/drive/useDriveFiles';
 import * as driveApiService from '@/services/drive/driveApiService';
 import * as authService from '@/services/auth';
+import { driveCache } from '@/services/drive/driveCache';
 import { mockValidDriveFile, mockValidDriveFolder } from '../mocks/driveMocks';
 
-describe('useDriveFiles — Hook de Gerenciamento e Navegação do Drive (PR05)', () => {
+describe('useDriveFiles — Hook de Gerenciamento e Navegação do Drive (PR05 / PR06)', () => {
   beforeEach(() => {
+    driveCache.clear();
     vi.restoreAllMocks();
   });
 
   afterEach(() => {
+    driveCache.clear();
     vi.restoreAllMocks();
   });
 
@@ -170,5 +173,145 @@ describe('useDriveFiles — Hook de Gerenciamento e Navegação do Drive (PR05)'
 
     expect(logoutMock).toHaveBeenCalled();
     expect(result.current.syncState.error?.code).toBe('unauthenticated');
+  });
+
+  it('utiliza o cache em memória ao retornar para uma pasta previamente visitada', async () => {
+    vi.spyOn(authService, 'useAuth').mockReturnValue({
+      session: { status: 'connected' },
+      error: null,
+      isConfigured: true,
+      login: vi.fn(),
+      logout: vi.fn(),
+      clearError: vi.fn(),
+    });
+
+    const fetchSpy = vi
+      .spyOn(driveApiService, 'fetchDriveFiles')
+      .mockResolvedValue({
+        files: [mockValidDriveFile],
+      });
+
+    const { result } = renderHook(() => useDriveFiles());
+
+    await waitFor(() => {
+      expect(result.current.syncState.status).toBe('synchronized');
+    });
+
+    // 1 chamada para 'root'
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    // Navega para subpasta
+    await act(async () => {
+      await result.current.navigateToFolder({
+        id: 'subfolder_1',
+        name: 'Pasta 1',
+      });
+    });
+
+    // 2 chamadas no total
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+
+    // Retorna para a raiz (já está no cache!)
+    await act(async () => {
+      await result.current.navigateUp();
+    });
+
+    // Não deve fazer nova chamada à API! Continua com 2 chamadas
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(result.current.items).toHaveLength(1);
+    expect(result.current.currentFolder.id).toBe('root');
+  });
+
+  it('executa busca na API com debounce de 350ms e permite limpar a busca', async () => {
+    vi.useFakeTimers();
+
+    vi.spyOn(authService, 'useAuth').mockReturnValue({
+      session: { status: 'connected' },
+      error: null,
+      isConfigured: true,
+      login: vi.fn(),
+      logout: vi.fn(),
+      clearError: vi.fn(),
+    });
+
+    const fetchSpy = vi
+      .spyOn(driveApiService, 'fetchDriveFiles')
+      .mockResolvedValue({
+        files: [mockValidDriveFile],
+      });
+
+    const { result } = renderHook(() => useDriveFiles());
+
+    // Carga inicial
+    await act(async () => {
+      vi.runOnlyPendingTimers();
+    });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    // Digita busca
+    act(() => {
+      result.current.setSearchTerm('relatorio');
+    });
+
+    expect(result.current.searchTerm).toBe('relatorio');
+    // Antes do debounce, ainda não chamou
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    // Avança o timer do debounce (350ms)
+    await act(async () => {
+      vi.advanceTimersByTime(350);
+    });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(fetchSpy).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        searchTerm: 'relatorio',
+        restrictToFolder: true,
+      })
+    );
+
+    // Limpa a busca
+    await act(async () => {
+      result.current.clearSearch();
+    });
+
+    expect(result.current.searchTerm).toBe('');
+    expect(result.current.isSearching).toBe(false);
+
+    vi.useRealTimers();
+  });
+
+  it('chamar refresh invalida o cache da pasta e busca dados frescos na API', async () => {
+    vi.spyOn(authService, 'useAuth').mockReturnValue({
+      session: { status: 'connected' },
+      error: null,
+      isConfigured: true,
+      login: vi.fn(),
+      logout: vi.fn(),
+      clearError: vi.fn(),
+    });
+
+    const fetchSpy = vi
+      .spyOn(driveApiService, 'fetchDriveFiles')
+      .mockResolvedValue({
+        files: [mockValidDriveFile],
+      });
+
+    const { result } = renderHook(() => useDriveFiles());
+
+    await waitFor(() => {
+      expect(result.current.syncState.status).toBe('synchronized');
+    });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    // Chama refresh()
+    await act(async () => {
+      await result.current.refresh();
+    });
+
+    // Deve forçar nova chamada à API
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
   });
 });

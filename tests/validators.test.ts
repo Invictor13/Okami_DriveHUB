@@ -132,14 +132,28 @@ describe('Camada de Validação — Contratos Google Drive API v3 (PR03)', () =>
       }
     });
 
-    it('preserva valores inteiros de 64 bits gigantes sem perda silenciosa de precisão', () => {
-      // Exemplo de tamanho acima de Number.MAX_SAFE_INTEGER (9007199254740991)
-      const bigIntStr = '9007199254740992999';
-      const parsed = DriveSizeSchema.safeParse(bigIntStr);
+    it('preserva valores inteiros de 64 bits gigantes até o limite máximo int64', () => {
+      // Limite exato de int64: 9223372036854775807
+      const maxInt64Str = '9223372036854775807';
+      const parsed = DriveSizeSchema.safeParse(maxInt64Str);
       expect(parsed.success).toBe(true);
       if (parsed.success) {
-        expect(parsed.data).toBe(bigIntStr);
+        expect(parsed.data).toBe(maxInt64Str);
       }
+    });
+
+    it('rejeita valores que ultrapassam o limite do int64 (9223372036854775807)', () => {
+      const overflowInt64 = '9223372036854775808';
+      expect(DriveSizeSchema.safeParse(overflowInt64).success).toBe(false);
+    });
+
+    it('rejeita números numéricos que não sejam safe integers ou sejam floats', () => {
+      // Float
+      expect(DriveSizeSchema.safeParse(1024.5).success).toBe(false);
+      // Maior que Number.MAX_SAFE_INTEGER (9007199254740991)
+      expect(
+        DriveSizeSchema.safeParse(Number.MAX_SAFE_INTEGER + 10).success
+      ).toBe(false);
     });
 
     it('converte números inteiros não-negativos para string fielmente', () => {

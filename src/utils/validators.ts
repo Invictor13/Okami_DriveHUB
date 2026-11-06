@@ -31,11 +31,14 @@ export const DriveShortcutDetailsSchema = z.object({
   targetResourceKey: z.string().optional(),
 });
 
+const MAX_INT64 = 9223372036854775807n;
+
 /**
  * Schema Zod para validação do tamanho do arquivo da Google Drive API.
  * Conforme especificação oficial, o tamanho é retornado como string numérica de 64 bits (int64).
- * Suporta também entrada numérica inteira não-negativa para flexibilidade, convertendo para string
- * sem perda de precisão e rejeitando categoricamente valores negativos e caracteres não-numéricos.
+ * Suporta entrada numérica desde que seja um safe integer não-negativo (<= Number.MAX_SAFE_INTEGER)
+ * para evitar perda de precisão silenciosa.
+ * Se string, valida dígitos inteiros e o limite superior int64 (9223372036854775807).
  */
 export const DriveSizeSchema = z
   .union([
@@ -44,13 +47,29 @@ export const DriveSizeSchema = z
       .regex(
         /^\d+$/,
         'O tamanho deve ser uma string de dígitos numéricos não-negativos'
+      )
+      .refine(
+        (val) => {
+          try {
+            const b = BigInt(val);
+            return b >= 0n && b <= MAX_INT64;
+          } catch {
+            return false;
+          }
+        },
+        {
+          message:
+            'O tamanho excede o limite máximo permitido para int64 (9223372036854775807)',
+        }
       ),
     z
       .number()
-      .int('O tamanho deve ser um número inteiro')
-      .nonnegative('O tamanho não pode ser negativo'),
+      .refine((val) => Number.isSafeInteger(val) && val >= 0, {
+        message:
+          'O tamanho numérico deve ser um inteiro seguro e não-negativo (<= Number.MAX_SAFE_INTEGER)',
+      })
+      .transform((val) => String(val)),
   ])
-  .transform((val) => String(val))
   .optional();
 
 /**

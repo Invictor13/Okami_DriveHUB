@@ -22,10 +22,23 @@ describe('formatBytes — Conversão Segura de Tamanho de Arquivo', () => {
     expect(formatBytes('')).toBe('—');
   });
 
-  it('retorna traço "—" para valores inválidos ou negativos', () => {
+  it('retorna traço "—" para valores inválidos, negativos ou floats inseguros', () => {
     expect(formatBytes(-100)).toBe('—');
     expect(formatBytes('-50')).toBe('—');
     expect(formatBytes('invalido')).toBe('—');
     expect(formatBytes(NaN)).toBe('—');
+    expect(formatBytes(1024.5)).toBe('—');
+  });
+
+  it('processa com precisão BigInt valores próximos e acima de Number.MAX_SAFE_INTEGER e até o limite int64', () => {
+    // Number.MAX_SAFE_INTEGER = 9007199254740991 (~8 PB)
+    expect(formatBytes(Number.MAX_SAFE_INTEGER)).toBe('8 PB');
+    expect(formatBytes('9007199254740993')).toBe('8 PB');
+
+    // Limite máximo int64: 9223372036854775807 (~8 EB)
+    expect(formatBytes('9223372036854775807')).toBe('8 EB');
+
+    // Acima do limite int64 deve retornar '—'
+    expect(formatBytes('9223372036854775808')).toBe('—');
   });
 });
