@@ -477,4 +477,268 @@ describe('useDriveFiles — Sincronização Resiliente e Concorrência (PR07)', 
     expect(result.current.syncState.error?.code).toBe('server_error');
     expect(result.current.syncState.error?.message).toContain('HTTP 500');
   });
+
+  it('9. Pesquisa A pendente, usuário digita B e A resolve antes dos 350 ms: A não pode atualizar a interface', async () => {
+    vi.spyOn(authService, 'useAuth').mockReturnValue({
+      session: { status: 'connected', userEmail: 'user@example.com' },
+      error: null,
+      isConfigured: true,
+      login: vi.fn(),
+      logout: vi.fn(),
+      clearError: vi.fn(),
+    });
+
+    let resolveSearchA: (value: { files: DriveItem[] }) => void;
+    let resolveSearchB: (value: { files: DriveItem[] }) => void;
+
+    const promiseA = new Promise<{ files: DriveItem[] }>((resolve) => {
+      resolveSearchA = resolve;
+    });
+    const promiseB = new Promise<{ files: DriveItem[] }>((resolve) => {
+      resolveSearchB = resolve;
+    });
+
+    vi.spyOn(driveApiService, 'fetchDriveFiles')
+      // Carga inicial
+      .mockResolvedValueOnce({ files: [] })
+      // Pesquisa A
+      .mockImplementationOnce(() => promiseA)
+      // Pesquisa B
+      .mockImplementationOnce(() => promiseB);
+
+    const { result } = renderHook(() => useDriveFiles());
+
+    await waitFor(() => {
+      expect(result.current.syncState.status).toBe('synchronized');
+    });
+
+    // Inicia pesquisa A e espera o debounce de A disparar o fetch
+    act(() => {
+      result.current.setSearchTerm('Alpha');
+    });
+
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 400));
+    });
+
+    // Agora a pesquisa A está pendente na rede.
+    // O usuário digita 'Beta' (B), acionando setSearchTerm('Beta')
+    act(() => {
+      result.current.setSearchTerm('Beta');
+    });
+
+    // Neste momento, estamos dentro da janela de 350ms do debounce de B.
+    // A pesquisa A (obsoleta) resolve ANTES dos 350ms estourarem!
+    await act(async () => {
+      resolveSearchA!({ files: [fileAlpha] });
+    });
+
+    // A resposta de A NÃO PODE atualizar a interface nem a lista de itens!
+    expect(result.current.items).toHaveLength(0);
+
+    // Agora o timer de B estoura (350ms) e dispara o fetch de B
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 400));
+    });
+
+    // Pesquisa B resolve com os dados de Beta
+    await act(async () => {
+      resolveSearchB!({ files: [fileBeta] });
+    });
+
+    // Somente os dados de Beta são apresentados na interface
+    expect(result.current.items).toHaveLength(1);
+    expect(result.current.items[0]?.id).toBe('canonical_file_beta_id');
+  });
+
+  it('10. Paginação pendente cancelada por nova pesquisa: isLoadingMore deve voltar a false imediatamente', async () => {
+    vi.spyOn(authService, 'useAuth').mockReturnValue({
+      session: { status: 'connected', userEmail: 'user@example.com' },
+      error: null,
+      isConfigured: true,
+      login: vi.fn(),
+      logout: vi.fn(),
+      clearError: vi.fn(),
+    });
+
+    let resolvePagination: (value: { files: DriveItem[] }) => void;
+    const paginationPromise = new Promise<{ files: DriveItem[] }>((resolve) => {
+      resolvePagination = resolve;
+    });
+
+    vi.spyOn(driveApiService, 'fetchDriveFiles')
+      // Carga inicial com token de paginação
+      .mockResolvedValueOnce({
+        files: [fileAlpha],
+        nextPageToken: 'token_p2',
+      })
+      // Paginação pendente
+      .mockImplementationOnce(() => paginationPromise)
+      // Nova pesquisa
+      .mockResolvedValueOnce({
+        files: [fileBeta],
+      });
+
+    const { result } = renderHook(() => useDriveFiles());
+
+    await waitFor(() => {
+      expect(result.current.items).toHaveLength(1);
+    });
+
+    // Inicia paginação
+    act(() => {
+      void result.current.loadNextPage();
+    });
+
+    expect(result.current.isLoadingMore).toBe(true);
+
+    // Usuário digita nova pesquisa enquanto a paginação está pendente
+    act(() => {
+      result.current.setSearchTerm('Beta');
+    });
+
+    // isLoadingMore DEVE voltar a false imediatamente!
+    expect(result.current.isLoadingMore).toBe(false);
+
+    // Resolve a paginação pendente defasada
+    await act(async () => {
+      resolvePagination!({ files: [fileAlpha] });
+    });
+
+    // isLoadingMore continua false e não anexa nada
+    expect(result.current.isLoadingMore).toBe(false);
+
+    // Avança o timer do debounce da nova pesquisa
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 400));
+    });
+
+    await waitFor(() => {
+      expect(result.current.items).toHaveLength(1);
+      expect(result.current.items[0]?.id).toBe('canonical_file_beta_id');
+    });
+  });
+
+  it('11. Navegação durante paginação: resultados da pasta anterior não podem ser anexados', async () => {
+    vi.spyOn(authService, 'useAuth').mockReturnValue({
+      session: { status: 'connected', userEmail: 'user@example.com' },
+      error: null,
+      isConfigured: true,
+      login: vi.fn(),
+      logout: vi.fn(),
+      clearError: vi.fn(),
+    });
+
+    let resolveOldPage: (value: { files: DriveItem[] }) => void;
+    const oldPagePromise = new Promise<{ files: DriveItem[] }>((resolve) => {
+      resolveOldPage = resolve;
+    });
+
+    const extraFileRoot: DriveItem = {
+      ...mockValidDriveFile,
+      id: 'root_extra_file_p2',
+      name: 'Arquivo Antigo da Raiz.pdf',
+    };
+
+    vi.spyOn(driveApiService, 'fetchDriveFiles')
+      // Raiz inicial
+      .mockResolvedValueOnce({
+        files: [fileAlpha],
+        nextPageToken: 'token_page_root_2',
+      })
+      // Paginação da raiz pendente
+      .mockImplementationOnce(() => oldPagePromise)
+      // Navegação para a Pasta B
+      .mockResolvedValueOnce({
+        files: [fileBeta],
+      });
+
+    const { result } = renderHook(() => useDriveFiles());
+
+    await waitFor(() => {
+      expect(result.current.items).toHaveLength(1);
+    });
+
+    // Inicia paginação na pasta raiz
+    act(() => {
+      void result.current.loadNextPage();
+    });
+
+    expect(result.current.isLoadingMore).toBe(true);
+
+    // Usuário navega para a Pasta B enquanto a página 2 da raiz está pendente
+    act(() => {
+      void result.current.navigateToFolder(folderB);
+    });
+
+    // isLoadingMore é resetado imediatamente e a pasta atual muda para Pasta B
+    expect(result.current.isLoadingMore).toBe(false);
+    expect(result.current.currentFolder.id).toBe('folder_beta_id');
+
+    await waitFor(() => {
+      expect(result.current.items[0]?.id).toBe('canonical_file_beta_id');
+    });
+
+    // Agora a página 2 da pasta raiz antiga resolve
+    await act(async () => {
+      resolveOldPage!({ files: [extraFileRoot] });
+    });
+
+    // Os itens da pasta anterior NÃO PODEM ser anexados à Pasta B!
+    expect(result.current.currentFolder.id).toBe('folder_beta_id');
+    expect(result.current.items).toHaveLength(1);
+    expect(result.current.items[0]?.id).toBe('canonical_file_beta_id');
+  });
+
+  it('12. Cancelamento seguido de nova requisição: a nova requisição deve atualizar normalmente', async () => {
+    vi.spyOn(authService, 'useAuth').mockReturnValue({
+      session: { status: 'connected', userEmail: 'user@example.com' },
+      error: null,
+      isConfigured: true,
+      login: vi.fn(),
+      logout: vi.fn(),
+      clearError: vi.fn(),
+    });
+
+    vi.spyOn(driveApiService, 'fetchDriveFiles')
+      // Carga inicial
+      .mockResolvedValueOnce({ files: [fileAlpha] })
+      // Requisição cancelada
+      .mockRejectedValueOnce(new DOMException('Aborted', 'AbortError'))
+      // Nova requisição bem-sucedida
+      .mockResolvedValueOnce({
+        files: [fileBeta],
+        nextPageToken: 'token_beta_next',
+      });
+
+    const { result } = renderHook(() => useDriveFiles());
+
+    await waitFor(() => {
+      expect(result.current.syncState.status).toBe('synchronized');
+      expect(result.current.items[0]?.id).toBe('canonical_file_alpha_id');
+    });
+
+    // Dispara refresh que é cancelado
+    act(() => {
+      void result.current.refresh();
+    });
+
+    // Imediatamente dispara nova busca legítima
+    act(() => {
+      result.current.setSearchTerm('Beta');
+    });
+
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 400));
+    });
+
+    // A nova requisição deve processar com total normalidade
+    await waitFor(() => {
+      expect(result.current.syncState.status).toBe('synchronized');
+      expect(result.current.items).toHaveLength(1);
+      expect(result.current.items[0]?.id).toBe('canonical_file_beta_id');
+      expect(result.current.nextPageToken).toBe('token_beta_next');
+      expect(result.current.syncState.error).toBeNull();
+    });
+  });
 });

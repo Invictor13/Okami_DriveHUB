@@ -100,8 +100,11 @@ export function useDriveFiles(): UseDriveFilesReturn {
           error: null,
         });
         setItems([]);
+        setIsLoadingMore(false);
         return;
       }
+
+      setIsLoadingMore(false);
 
       // Aborta qualquer requisição anterior em voo
       if (abortControllerRef.current) {
@@ -230,6 +233,8 @@ export function useDriveFiles(): UseDriveFilesReturn {
         return;
       }
 
+      setIsLoadingMore(false);
+
       // Aborta qualquer requisição anterior em voo
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
@@ -317,7 +322,7 @@ export function useDriveFiles(): UseDriveFilesReturn {
     [session.status, logout, fetchFolderContents]
   );
 
-  // Define o termo de busca com debounce de 350ms
+  // Define o termo de busca com debounce de 350ms e invalidação imediata (PR07)
   const setSearchTerm = useCallback(
     (term: string) => {
       setSearchTermState(term);
@@ -328,10 +333,29 @@ export function useDriveFiles(): UseDriveFilesReturn {
         debounceTimerRef.current = null;
       }
 
+      // Invalidação imediata antes do timer do debounce (PR07):
+      // 1. Abortar qualquer requisição anterior em voo
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+        abortControllerRef.current = null;
+      }
+
+      // 2. Incrementar imediatamente o identificador sequencial da requisição
+      ++activeRequestIdRef.current;
+
+      // 3. Invalidar imediatamente a identidade da consulta anterior
       const trimmed = term.trim();
+      const targetFolderId = currentFolderRef.current.id;
+      activeQueryKeyRef.current = trimmed
+        ? `search:${trimmed}:${restrictToFolderRef.current ? targetFolderId : 'global'}`
+        : `folder:${targetFolderId}`;
+
+      // 4. Cancelar imediatamente qualquer estado preso de paginação
+      setIsLoadingMore(false);
+
       if (!trimmed) {
         setIsSearching(false);
-        void fetchFolderContents(currentFolderRef.current.id);
+        void fetchFolderContents(targetFolderId);
         return;
       }
 
@@ -369,6 +393,7 @@ export function useDriveFiles(): UseDriveFilesReturn {
     setSearchTermState('');
     searchTermRef.current = '';
     setIsSearching(false);
+    setIsLoadingMore(false);
     void fetchFolderContents(currentFolderRef.current.id);
   }, [fetchFolderContents]);
 
@@ -473,10 +498,7 @@ export function useDriveFiles(): UseDriveFilesReturn {
         error: syncError,
       }));
     } finally {
-      if (
-        currentRequestId === activeRequestIdRef.current &&
-        originQueryKey === activeQueryKeyRef.current
-      ) {
+      if (currentRequestId === activeRequestIdRef.current) {
         setIsLoadingMore(false);
       }
     }
@@ -492,6 +514,7 @@ export function useDriveFiles(): UseDriveFilesReturn {
       setSearchTermState('');
       searchTermRef.current = '';
       setIsSearching(false);
+      setIsLoadingMore(false);
 
       setFolderStack((prev) => [...prev, folder]);
       await fetchFolderContents(folder.id);
@@ -510,6 +533,7 @@ export function useDriveFiles(): UseDriveFilesReturn {
     setSearchTermState('');
     searchTermRef.current = '';
     setIsSearching(false);
+    setIsLoadingMore(false);
 
     const newStack = folderStack.slice(0, folderStack.length - 1);
     setFolderStack(newStack);
@@ -529,6 +553,7 @@ export function useDriveFiles(): UseDriveFilesReturn {
       setSearchTermState('');
       searchTermRef.current = '';
       setIsSearching(false);
+      setIsLoadingMore(false);
 
       const newStack = folderStack.slice(0, index + 1);
       setFolderStack(newStack);
@@ -591,6 +616,7 @@ export function useDriveFiles(): UseDriveFilesReturn {
       setItems([]);
       setFolderStack([ROOT_FOLDER]);
       setNextPageToken(undefined);
+      setIsLoadingMore(false);
       setSearchTermState('');
       searchTermRef.current = '';
       setIsSearching(false);
