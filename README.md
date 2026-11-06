@@ -9,7 +9,7 @@
 O **Okami DriveHUB** é um hub de arquivos e navegação pessoal moderno, responsivo e modular. Ele une fluidez visual, navegação otimizada por teclado e controles de console à organização de arquivos e pastas reais do usuário no Google Drive.
 
 > [!NOTE]
-> **Situação Atual da Integração (PR06):** Busca por nome com debounce, filtros avançados por tipos MIME, alternância de visualização (Grade e Lista Compacta), ordenação dinâmica e cache em memória volátil de pastas visitadas plenamente integrados à **Google Drive API v3** real. A precisão do campo `size` foi reforçada com `BigInt` (int64) e todas as consultas são rigorosamente sanitizadas contra injeção de parâmetros. Nenhum dado simulado ou arquivo fictício é apresentado.
+> **Situação Atual da Inicialização e Sincronização (PR07):** Resolução definitiva da tela branca no GitHub Pages (estilos defensivos inline, tela de carregamento de console no HTML bruto, bootstrap resiliente com try/catch e sanitização de credenciais no ErrorBoundary). Hardening completo de sincronização contra condições de corrida (_race conditions_) em `useDriveFiles.ts` com `AbortController`, identificador sequencial `requestId`, vinculação de identidade de consulta `queryKey`, invalidação de respostas obsoletas e proteção contra poluição de cache.
 
 ---
 
@@ -446,12 +446,14 @@ Okami_DriveHUB/
     ├── validators.test.ts    # Testes dos validadores Zod da Google Drive API
     ├── components/
     │   ├── AuthIntegration.test.tsx # Testes de integração de interface e auth
-    │   └── DriveExplorer.test.tsx   # Testes da interface do explorador de arquivos
+    │   ├── DriveExplorer.test.tsx   # Testes da interface do explorador de arquivos
+    │   └── ErrorBoundary.test.tsx   # [PR07] Testes de captura e sanitização de credenciais
     ├── services/
     │   ├── driveApiService.test.ts  # Testes do cliente HTTP da Drive API v3
     │   ├── driveCache.test.ts       # [PR06] Testes do cache em memória e invalidação
     │   ├── googleAuthService.test.ts # Testes do serviço GIS e fluxos OAuth
     │   ├── tokenStore.test.ts        # Testes de segurança de tokens em memória RAM
+    │   ├── useDriveFiles.race.test.ts # [PR07] Testes de concorrência e race conditions
     │   └── useDriveFiles.test.ts     # Testes do hook de navegação, busca e cache
     └── mocks/
         └── driveMocks.ts     # Mocks isolados exclusivamente para testes automatizados
@@ -468,6 +470,7 @@ Okami_DriveHUB/
 - [x] **PR04 — Camada de Autenticação Segura (Google Identity Services)**
 - [x] **PR05 — Serviço de Integração Real com Google Drive API v3**
 - [x] **PR06 — Busca, Filtros, Visualização e Ordenação do Drive**
-- [ ] **PR07 — Componentes Core e Experiência Horizon OS (Nintendo Switch UX)**
-- [ ] **PR08 — Módulos Secundários (Explorer, Atalhos Web, Dashboard ADM)**
-- [ ] **PR09 — Cobertura Abrangente de Testes e Pipeline CI/CD**
+- [x] **PR07 — Correção da Inicialização, Sincronização Resiliente e Higiene Estrutural**
+- [ ] **PR08 — Componentes Core e Experiência Horizon OS (Nintendo Switch UX)**
+- [ ] **PR09 — Módulos Secundários (Atalhos Web, Dashboard ADM)**
+- [ ] **PR10 — Cobertura Abrangente de Testes e Pipeline Final**

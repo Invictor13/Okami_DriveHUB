@@ -6,10 +6,11 @@
  *
  * REGRAS INEGOCIÁVEIS:
  * - Operações exclusivamente de LEITURA.
+ * - Sincronização resiliente: AbortController, requestId sequencial, validação de queryKey.
  * - Deduplicação rigorosa pelo ID canônico original da Google Drive API v3.
  * - Cache em memória volátil via driveCache (zero tokens ou persistência em disco).
- * - Tratamento seguro de busca com expressão 'name contains' da Drive API.
- * - Descarte imediato de cache e dados ao desconectar a sessão.
+ * - Proteção estrita contra race conditions, respostas obsoletas e poluição de cache.
+ * - Descarte imediato de cache e cancelamento seguro ao desconectar a sessão.
  */
 
 import { useState, useCallback, useEffect, useRef } from 'react';
@@ -65,6 +66,10 @@ export function useDriveFiles(): UseDriveFilesReturn {
   const [restrictToFolder, setRestrictToFolderState] = useState<boolean>(true);
   const [isSearching, setIsSearching] = useState<boolean>(false);
 
+  // Mecanismos de controle de concorrência e resiliência
+  const activeRequestIdRef = useRef<number>(0);
+  const activeQueryKeyRef = useRef<string>('');
+  const abortControllerRef = useRef<AbortController | null>(null);
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [syncState, setSyncState] = useState<SyncState>({
@@ -84,31 +89,49 @@ export function useDriveFiles(): UseDriveFilesReturn {
   const searchTermRef = useRef(searchTerm);
   searchTermRef.current = searchTerm;
 
-  // Carrega o conteúdo de uma pasta (com cache em memória volátil)
+  // Carrega o conteúdo de uma pasta (com proteção de concorrência e cache volátil)
   const fetchFolderContents = useCallback(
     async (folderId: string, isRefresh = false) => {
       if (session.status !== 'connected') {
-        setSyncState((prev) => ({
-          ...prev,
+        setSyncState({
           status: 'disconnected',
+          lastSyncedAt: null,
+          itemCount: 0,
           error: null,
-        }));
+        });
         setItems([]);
         return;
       }
 
-      // Se não for atualização forçada (refresh), verificar se já existe no cache em memória
+      // Aborta qualquer requisição anterior em voo
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
+
+      // Registra identidade e identificador sequencial da consulta
+      const currentRequestId = ++activeRequestIdRef.current;
+      const expectedQueryKey = `folder:${folderId}`;
+      activeQueryKeyRef.current = expectedQueryKey;
+
+      // Se não for refresh forçado, verificar o cache volátil em memória
       if (!isRefresh) {
         const cached = driveCache.get(folderId);
         if (cached) {
-          setItems(cached.items);
-          setNextPageToken(cached.nextPageToken);
-          setSyncState({
-            status: 'synchronized',
-            lastSyncedAt: new Date(cached.cachedAt).toISOString(),
-            itemCount: cached.items.length,
-            error: null,
-          });
+          if (
+            currentRequestId === activeRequestIdRef.current &&
+            expectedQueryKey === activeQueryKeyRef.current
+          ) {
+            setItems(cached.items);
+            setNextPageToken(cached.nextPageToken);
+            setSyncState({
+              status: 'synchronized',
+              lastSyncedAt: new Date(cached.cachedAt).toISOString(),
+              itemCount: cached.items.length,
+              error: null,
+            });
+          }
           return;
         }
       } else {
@@ -123,7 +146,18 @@ export function useDriveFiles(): UseDriveFilesReturn {
       }));
 
       try {
-        const response = await fetchDriveFiles({ parentId: folderId });
+        const response = await fetchDriveFiles({
+          parentId: folderId,
+          signal: controller.signal,
+        });
+
+        // Valida se a resposta ainda pertence à consulta ativa e ao requestId corrente
+        if (
+          currentRequestId !== activeRequestIdRef.current ||
+          expectedQueryKey !== activeQueryKeyRef.current
+        ) {
+          return;
+        }
 
         // Deduplicação pelo ID canônico original da Google Drive API
         const itemsMap = new Map<string, DriveItem>();
@@ -132,7 +166,7 @@ export function useDriveFiles(): UseDriveFilesReturn {
         }
         const uniqueFiles = Array.from(itemsMap.values());
 
-        // Salva no cache em memória volátil
+        // Salva com segurança no cache em memória volátil
         driveCache.set(folderId, uniqueFiles, response.nextPageToken);
 
         setItems(uniqueFiles);
@@ -145,6 +179,19 @@ export function useDriveFiles(): UseDriveFilesReturn {
           error: null,
         });
       } catch (err) {
+        // Descarte silencioso de cancelamento esperado
+        if ((err as Error)?.name === 'AbortError') {
+          return;
+        }
+
+        // Se a requisição já for obsoleta, ignorar erro
+        if (
+          currentRequestId !== activeRequestIdRef.current ||
+          expectedQueryKey !== activeQueryKeyRef.current
+        ) {
+          return;
+        }
+
         const driveErr = err as DriveServiceError;
 
         if (driveErr.code === 'unauthenticated') {
@@ -152,8 +199,9 @@ export function useDriveFiles(): UseDriveFilesReturn {
         }
 
         const syncError: SyncError = {
-          code: driveErr.code,
-          message: driveErr.message,
+          code: driveErr.code || 'unknown',
+          message:
+            driveErr.message || 'Falha ao sincronizar com o Google Drive.',
           timestamp: new Date().toISOString(),
           retryable:
             driveErr.code !== 'unauthenticated' &&
@@ -170,7 +218,7 @@ export function useDriveFiles(): UseDriveFilesReturn {
     [session.status, logout]
   );
 
-  // Executa busca direta na Google Drive API
+  // Executa busca na Google Drive API com proteção de concorrência
   const executeSearch = useCallback(
     async (term: string, restrict: boolean) => {
       if (session.status !== 'connected') return;
@@ -182,6 +230,18 @@ export function useDriveFiles(): UseDriveFilesReturn {
         return;
       }
 
+      // Aborta qualquer requisição anterior em voo
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
+
+      const currentRequestId = ++activeRequestIdRef.current;
+      const targetFolderId = currentFolderRef.current.id;
+      const expectedQueryKey = `search:${trimmed}:${restrict ? targetFolderId : 'global'}`;
+      activeQueryKeyRef.current = expectedQueryKey;
+
       setIsSearching(true);
       setSyncState((prev) => ({
         ...prev,
@@ -191,10 +251,19 @@ export function useDriveFiles(): UseDriveFilesReturn {
 
       try {
         const response = await fetchDriveFiles({
-          parentId: currentFolderRef.current.id,
+          parentId: targetFolderId,
           searchTerm: trimmed,
           restrictToFolder: restrict,
+          signal: controller.signal,
         });
+
+        // Valida se a resposta ainda corresponde à busca ativa
+        if (
+          currentRequestId !== activeRequestIdRef.current ||
+          expectedQueryKey !== activeQueryKeyRef.current
+        ) {
+          return;
+        }
 
         const itemsMap = new Map<string, DriveItem>();
         for (const file of response.files) {
@@ -212,6 +281,17 @@ export function useDriveFiles(): UseDriveFilesReturn {
           error: null,
         });
       } catch (err) {
+        if ((err as Error)?.name === 'AbortError') {
+          return;
+        }
+
+        if (
+          currentRequestId !== activeRequestIdRef.current ||
+          expectedQueryKey !== activeQueryKeyRef.current
+        ) {
+          return;
+        }
+
         const driveErr = err as DriveServiceError;
 
         if (driveErr.code === 'unauthenticated') {
@@ -219,8 +299,8 @@ export function useDriveFiles(): UseDriveFilesReturn {
         }
 
         const syncError: SyncError = {
-          code: driveErr.code,
-          message: driveErr.message,
+          code: driveErr.code || 'unknown',
+          message: driveErr.message || 'Falha na pesquisa no Google Drive.',
           timestamp: new Date().toISOString(),
           retryable:
             driveErr.code !== 'unauthenticated' &&
@@ -241,24 +321,40 @@ export function useDriveFiles(): UseDriveFilesReturn {
   const setSearchTerm = useCallback(
     (term: string) => {
       setSearchTermState(term);
+      searchTermRef.current = term;
 
       if (debounceTimerRef.current) {
         clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
       }
 
+      const trimmed = term.trim();
+      if (!trimmed) {
+        setIsSearching(false);
+        void fetchFolderContents(currentFolderRef.current.id);
+        return;
+      }
+
+      setIsSearching(true);
       debounceTimerRef.current = setTimeout(() => {
-        void executeSearch(term, restrictToFolderRef.current);
+        void executeSearch(trimmed, restrictToFolderRef.current);
       }, 350);
     },
-    [executeSearch]
+    [executeSearch, fetchFolderContents]
   );
 
   // Altera restrição da busca à pasta atual
   const setRestrictToFolder = useCallback(
     (restrict: boolean) => {
       setRestrictToFolderState(restrict);
+      restrictToFolderRef.current = restrict;
+
       if (searchTermRef.current.trim()) {
-        void executeSearch(searchTermRef.current, restrict);
+        if (debounceTimerRef.current) {
+          clearTimeout(debounceTimerRef.current);
+          debounceTimerRef.current = null;
+        }
+        void executeSearch(searchTermRef.current.trim(), restrict);
       }
     },
     [executeSearch]
@@ -268,30 +364,66 @@ export function useDriveFiles(): UseDriveFilesReturn {
   const clearSearch = useCallback(() => {
     if (debounceTimerRef.current) {
       clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
     }
     setSearchTermState('');
+    searchTermRef.current = '';
     setIsSearching(false);
     void fetchFolderContents(currentFolderRef.current.id);
   }, [fetchFolderContents]);
 
-  // Carrega mais itens (próxima página)
+  // Carrega mais itens (próxima página) com vinculação estrita à consulta de origem
   const loadNextPage = useCallback(async () => {
-    if (!nextPageToken || isLoadingMore || session.status !== 'connected') {
+    const originQueryKey = activeQueryKeyRef.current;
+    const tokenToFetch = nextPageToken;
+    const folderId = currentFolderRef.current.id;
+    const activeSearch = searchTermRef.current.trim();
+    const restrict = restrictToFolderRef.current;
+
+    if (
+      !tokenToFetch ||
+      isLoadingMore ||
+      session.status !== 'connected' ||
+      !originQueryKey
+    ) {
       return;
     }
 
+    // Aborta requisição de rede anterior antes de iniciar paginação
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    const currentRequestId = ++activeRequestIdRef.current;
     setIsLoadingMore(true);
 
     try {
-      const activeSearch = searchTermRef.current.trim();
       const response = await fetchDriveFiles({
-        parentId: currentFolderRef.current.id,
-        pageToken: nextPageToken,
+        parentId: folderId,
+        pageToken: tokenToFetch,
         searchTerm: activeSearch || undefined,
-        restrictToFolder: restrictToFolderRef.current,
+        restrictToFolder: restrict,
+        signal: controller.signal,
       });
 
+      // Validação: a consulta ativa e o requestId mudaram enquanto a página carregava?
+      if (
+        currentRequestId !== activeRequestIdRef.current ||
+        originQueryKey !== activeQueryKeyRef.current
+      ) {
+        return;
+      }
+
       setItems((prevItems) => {
+        if (
+          currentRequestId !== activeRequestIdRef.current ||
+          originQueryKey !== activeQueryKeyRef.current
+        ) {
+          return prevItems;
+        }
+
         const itemsMap = new Map<string, DriveItem>();
         for (const item of prevItems) {
           itemsMap.set(item.id, item);
@@ -303,11 +435,7 @@ export function useDriveFiles(): UseDriveFilesReturn {
 
         // Se não for busca, atualizar o cache da pasta com a listagem ampliada
         if (!activeSearch) {
-          driveCache.set(
-            currentFolderRef.current.id,
-            updated,
-            response.nextPageToken
-          );
+          driveCache.set(folderId, updated, response.nextPageToken);
         }
 
         setSyncState((prevSync) => ({
@@ -321,10 +449,21 @@ export function useDriveFiles(): UseDriveFilesReturn {
 
       setNextPageToken(response.nextPageToken);
     } catch (err) {
+      if ((err as Error)?.name === 'AbortError') {
+        return;
+      }
+
+      if (
+        currentRequestId !== activeRequestIdRef.current ||
+        originQueryKey !== activeQueryKeyRef.current
+      ) {
+        return;
+      }
+
       const driveErr = err as DriveServiceError;
       const syncError: SyncError = {
-        code: driveErr.code,
-        message: driveErr.message,
+        code: driveErr.code || 'unknown',
+        message: driveErr.message || 'Falha ao carregar mais arquivos.',
         timestamp: new Date().toISOString(),
         retryable: true,
       };
@@ -334,18 +473,24 @@ export function useDriveFiles(): UseDriveFilesReturn {
         error: syncError,
       }));
     } finally {
-      setIsLoadingMore(false);
+      if (
+        currentRequestId === activeRequestIdRef.current &&
+        originQueryKey === activeQueryKeyRef.current
+      ) {
+        setIsLoadingMore(false);
+      }
     }
   }, [nextPageToken, isLoadingMore, session.status]);
 
   // Navega para uma subpasta
   const navigateToFolder = useCallback(
     async (folder: { id: string; name: string }) => {
-      // Ao navegar, limpar busca ativa
       if (debounceTimerRef.current) {
         clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
       }
       setSearchTermState('');
+      searchTermRef.current = '';
       setIsSearching(false);
 
       setFolderStack((prev) => [...prev, folder]);
@@ -360,8 +505,10 @@ export function useDriveFiles(): UseDriveFilesReturn {
 
     if (debounceTimerRef.current) {
       clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
     }
     setSearchTermState('');
+    searchTermRef.current = '';
     setIsSearching(false);
 
     const newStack = folderStack.slice(0, folderStack.length - 1);
@@ -377,8 +524,10 @@ export function useDriveFiles(): UseDriveFilesReturn {
 
       if (debounceTimerRef.current) {
         clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
       }
       setSearchTermState('');
+      searchTermRef.current = '';
       setIsSearching(false);
 
       const newStack = folderStack.slice(0, index + 1);
@@ -398,11 +547,16 @@ export function useDriveFiles(): UseDriveFilesReturn {
     }
   }, [fetchFolderContents, executeSearch]);
 
-  // Limpeza de timers no desmonte
+  // Limpeza de timers e cancelamento no desmonte do hook
   useEffect(() => {
     return () => {
       if (debounceTimerRef.current) {
         clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+        abortControllerRef.current = null;
       }
     };
   }, []);
@@ -412,19 +566,33 @@ export function useDriveFiles(): UseDriveFilesReturn {
     if (session.status === 'connected') {
       void fetchFolderContents(currentFolderRef.current.id);
     } else {
+      // Aborta imediatamente requisições ativas no logout
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+        abortControllerRef.current = null;
+      }
+      activeRequestIdRef.current++;
+      activeQueryKeyRef.current = '';
+
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+
       // Limpa integralmente o cache em memória no logout
       driveCache.clear();
 
-      setSyncState((prev) => ({
-        ...prev,
+      setSyncState({
         status: 'disconnected',
+        lastSyncedAt: null,
         itemCount: 0,
         error: null,
-      }));
+      });
       setItems([]);
       setFolderStack([ROOT_FOLDER]);
       setNextPageToken(undefined);
       setSearchTermState('');
+      searchTermRef.current = '';
       setIsSearching(false);
     }
   }, [session.status, fetchFolderContents]);
